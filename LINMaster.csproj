@@ -1,0 +1,158 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}</ProjectGuid>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>LINMaster</RootNamespace>
+    <AssemblyName>LINMaster</AssemblyName>
+    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup>
+    <ApplicationIcon>hatbit-logo.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Forms\FormMacChange.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Forms\FormMacChange.Designer.cs">
+      <DependentUpon>FormMacChange.cs</DependentUpon>
+    </Compile>
+    <Compile Include="FT4222\FT4222Manager.cs" />
+    <Compile Include="LINWebServer.cs" />
+    <Compile Include="TcpBridge.cs" />
+    <Compile Include="LIN\ILINGateway.cs" />
+    <Compile Include="LIN\PeakLINGateway.cs" />
+    <Compile Include="LIN\RS485Gateway.cs" />
+    <Compile Include="Forms\FormMain.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Forms\FormMain.Designer.cs">
+      <DependentUpon>FormMain.cs</DependentUpon>
+    </Compile>
+    <Compile Include="Forms\FormCIE.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Forms\FormCIE.Designer.cs">
+      <DependentUpon>FormCIE.cs</DependentUpon>
+    </Compile>
+    <Compile Include="Forms\FormNodeScan.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Forms\FormNodeScan.Designer.cs">
+      <DependentUpon>FormNodeScan.cs</DependentUpon>
+    </Compile>
+    <Compile Include="Forms\FormParamTuning.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Forms\FormParamTuning.Designer.cs">
+      <DependentUpon>FormParamTuning.cs</DependentUpon>
+    </Compile>
+    <Compile Include="Forms\FormParamTuning_XcpExt.cs">
+      <DependentUpon>FormParamTuning.cs</DependentUpon>
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Forms\FormParamTuning_GraphExt.cs">
+      <DependentUpon>FormParamTuning.cs</DependentUpon>
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="LIN\LINFrame.cs" />
+    <Compile Include="LIN\LINProtocol.cs" />
+    <Compile Include="LIN\LINGateway.cs" />
+    <Compile Include="Program.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Forms\FormMain.resx">
+      <DependentUpon>FormMain.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Forms\FormCIE.resx">
+      <DependentUpon>FormCIE.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Forms\FormNodeScan.resx">
+      <DependentUpon>FormNodeScan.cs</DependentUpon>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Forms\FormParamTuning.resx">
+      <DependentUpon>FormParamTuning.cs</DependentUpon>
+    </EmbeddedResource>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <ItemGroup>
+    <None Include="FT4222\ftd2xx.dll">
+      <Link>ftd2xx.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="FT4222\LibFT4222-64.dll">
+      <Link>LibFT4222-64.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="NativeOsp\CMakeLists.txt" />
+    <None Include="NativeOsp\adi_Eth10BaseT1s_cfg.c" />
+    <None Include="NativeOsp\adi_Eth10BaseT1s_cfg.h" />
+    <None Include="NativeOsp\ex_fioOsp.c" />
+    <None Include="NativeOsp\ex_fioOsp.h" />
+    <None Include="NativeOsp\utils\fioOsp.c" />
+    <None Include="NativeOsp\utils\fioOsp.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="hatbit-logo.ico" />
+  </ItemGroup>
+  <!-- ================================================================
+       NativeOsp / OspBridge.dll 자동 빌드
+       - cmake-build 폴더 삭제 후 항상 fresh configure + build
+       - 폴더를 어디로 옮겨도 CMakeCache.txt 경로 불일치 오류 없음
+       ================================================================ -->
+  <!-- Step 1: cmake-build 폴더 통째로 삭제 (경로 하드코딩 제거) -->
+  <Target Name="CleanCMakeBuildDir" BeforeTargets="ConfigureOspBridge">
+    <RemoveDir Directories="$(MSBuildProjectDirectory)\NativeOsp\cmake-build" Condition="Exists('$(MSBuildProjectDirectory)\NativeOsp\cmake-build')" />
+    <MakeDir Directories="$(MSBuildProjectDirectory)\NativeOsp\cmake-build" />
+  </Target>
+  <!-- Step 2: cmake configure (항상 실행) -->
+  <Target Name="ConfigureOspBridge" BeforeTargets="BuildOspBridge">
+    <Message Text="[NativeOsp] cmake configure..." Importance="high" />
+    <Exec Command="cmake -S &quot;$(MSBuildProjectDirectory)\NativeOsp&quot; -B &quot;$(MSBuildProjectDirectory)\NativeOsp\cmake-build&quot; -G Ninja" WorkingDirectory="$(MSBuildProjectDirectory)\NativeOsp\cmake-build" />
+  </Target>
+  <!-- Step 3: cmake build -->
+  <Target Name="BuildOspBridge" BeforeTargets="BeforeBuild">
+    <Message Text="[NativeOsp] cmake build..." Importance="high" />
+    <Exec Command="cmake --build &quot;$(MSBuildProjectDirectory)\NativeOsp\cmake-build&quot;" WorkingDirectory="$(MSBuildProjectDirectory)\NativeOsp\cmake-build" />
+  </Target>
+  <!-- Step 4: OspBridge.dll → bin 출력 폴더로 복사 -->
+  <Target Name="CopyOspBridge" AfterTargets="Build" Condition="Exists('$(MSBuildProjectDirectory)\NativeOsp\build\OspBridge.dll')">
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\NativeOsp\build\OspBridge.dll" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

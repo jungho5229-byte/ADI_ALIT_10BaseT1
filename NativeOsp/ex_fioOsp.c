@@ -1,0 +1,3170 @@
+
+#include "ex_fioOsp.h"
+#include "adi_otp.h"
+#include <stdarg.h>
+
+/*================================= DEFINES =================================*/
+/*================================ DATA TYPES ===============================*/
+
+/*================================ PROTOTYPES ===============================*/
+static void InitSystem();
+static void InitThread(void* arg);
+static void CreateThreads(void);
+static void CreateE2bApp(void);
+static void CreateE2bAppFixed(void);
+static void CreateE2bAppProgrammed(void);
+static int OspBridge_ReinitE2bAndOsp(void);
+static void AppThread1Fxn(void* arg);
+static void AppThread2Fxn(void* arg);
+static void HouseKeepingFxn(void* arg);
+static void ConsoleRun(void);
+static void PrintHelpContents(void);
+static void FioOspDeviceInit(void);
+static void FioOspResetFidDiag(void);
+static uint32_t FioOspMarkDiscoveredFids(void);
+static bool FioOspAnyFidHandleOpen(void);
+static ADI_EAL_STATUS FioOspInitFid(uint32_t nFidIdx);
+static void FioOspSetPwm(void);
+static void FioOspReadPwm(void);
+static void adi_network_cbk(uint32_t nDevNum, ADI_NETWORK_EVT eEvent, void* pData);
+static void EalTopCallbackFunc(uint32_t nInstNum, ADI_EAL_CBK_EVT eTopCbkEvent, const void* pArg);
+static void EalRemoteNodeCbk(uint32_t nInstNum, uint32_t nRemoteNum, ADI_EAL_NODE_CBK_EVT eRemoteCbkEvent,
+    const void* pArg);
+static void EalDiagCallback(uint32_t nInstNum, uint32_t nRemoteNum, ADI_EAL_DIAG_CBK_EVT eDiagCbkEvent,
+    const void* pArg);
+static void EalFioOspCallBack(uint32_t nInstNum, ADI_EAL_FIO_OSP_HANDLE hFioOspHandle, ADI_EAL_FIO_OSP_CBK_EVT eCbkEventType,
+    const void* pArg);
+
+static int OspBridge_SetColorRgbByFid_Impl(uint8_t nFid, uint8_t nRed, uint8_t nGreen, uint8_t nBlue);
+
+/* FID + 노드 주소(unicast) 기반 단일 LED 제어 — SlaveFlag 제어용 */
+static int OspBridge_SetColorRgbByNode_Impl(uint8_t nFid, uint16_t nNodeAddr, uint8_t nRed, uint8_t nGreen, uint8_t nBlue);
+static int OspBridge_SetColorRgbByNodeEx_Impl(uint8_t nFid, uint16_t nNodeAddr, uint8_t nRed, uint8_t nGreen, uint8_t nBlue, bool bFlush);
+static void OspBridge_CloseFioHandlesOnly(void);
+static uint64_t OspBridge_Mac6To64(const uint8_t* pMac6);
+static void OspBridge_Mac64To6(uint64_t nMac, uint8_t* pMac6);
+/*=================================== DATA ==================================*/
+/* --------------------- The MAC address mapping table --------------------- */
+ADI_MEM_DATA_CRIT_CACHE
+static uint8_t ganRemoteMacAddrMap[NUM_REMOTE_NODES][6u];
+
+/* --------------------------- Application data ---------------------------- */
+/*! MAC-PHY config */
+ADI_MEM_DATA_CRIT_CACHE
+static ADI_NETWORK_MACPHY_CFG goMacPhyCfg;
+
+ADI_MEM_DATA_CRIT_CACHE
+static APP_DATA goAppData;
+
+/*! Diagnostic Config */
+ADI_MEM_DATA_CRIT_CACHE
+static ADI_EAL_DIAG_CFG goEalDiagcfg;
+
+/*! EAL FIO OSP config */
+ADI_MEM_DATA_CRIT_CACHE
+static ADI_EAL_FIO_OSP_CFG goEalFioOspCfg;
+
+ADI_MEM_DATA_CRIT_CACHE
+static ADI_EAL_FIO_OSP_HANDLE ghFioOspHandle;
+
+#define OSP_FIO1_ONLY_TEST 1
+
+/* ── FIO 진단 구조체 — C#에서 OspBridge_GetFioDiag()로 읽음 ── */
+typedef struct
+{
+    /* FIO0 각 단계 status (0=성공, 그 외=실패코드) */
+    int nFio0Open;
+    int nFio0Callback;
+    int nFio0InstRAM;
+    int nFio0Reset;
+    int nFio0InitBidir;
+    int nFio0AssignedAddr;
+    int nFio0SetSetup;
+    int nFio0SetState;
+    /* FIO1 각 단계 status */
+    int nFio1Open;
+    int nFio1Callback;
+    int nFio1InstRAM;
+    int nFio1Reset;
+    int nFio1InitBidir;
+    int nFio1AssignedAddr;
+    int nFio1SetSetup;
+    int nFio1SetState;
+    /* 핸들 NULL 여부 (0=NULL, 1=유효) */
+    int nFio0HandleValid;
+    int nFio1HandleValid;
+} OSP_FIO_DIAG;
+
+static OSP_FIO_DIAG goFioDiag = { -99,-99,-99,-99,-99,-99,-99,-99,
+                                   -99,-99,-99,-99,-99,-99,-99,-99,
+                                   0, 0 };
+
+typedef struct
+{
+    int nOpen;
+    int nCallback;
+    int nInstRAM;
+    int nReset;
+    int nInitBidir;
+    int nAssignedAddr;
+    int nSetSetup;
+    int nSetState;
+    int nHandleValid;
+} OSP_FID_FIO_DIAG;
+
+static OSP_FID_FIO_DIAG gaFidFioDiag[NUM_REMOTE_NODES];
+
+/* FIO1 OSP 핸들 — FID 0x03(IF4/IF5, SAIF4/SAIF5) 채널용 */
+ADI_MEM_DATA_CRIT_CACHE
+static ADI_EAL_FIO_OSP_HANDLE ghFioOspHandle2;
+
+ADI_MEM_DATA_CRIT_CACHE
+static ADI_EAL_FIO_OSP_HANDLE gahFidFioOspHandle[NUM_REMOTE_NODES];
+/* FIO OSP multicast 핸들 — FID=0x00 broadcast 1회 전송용 */
+static ADI_EAL_FIO_OSP_HANDLE ghFioMcastHandle = NULL;
+static uint8_t gnFioMcastMem[ADI_EAL_FIO_OSP_MCAST_GROUP_MEM_SIZE(NUM_REMOTE_NODES)];
+/* pahFioOspHandles는 포인터 저장 → 스택 아닌 전역 배열 필수 */
+static ADI_EAL_FIO_OSP_HANDLE ganMcastHandles[NUM_REMOTE_NODES];
+static ADI_EAL_FIO_OSP_MCAST_CFG goMcastCfg;
+
+ADI_MEM_DATA_CRIT_CACHE
+static uint8_t gnFioOspMem[FIO_OSP_MEM];
+
+/* FIO1 메모리 버퍼 */
+ADI_MEM_DATA_CRIT_CACHE
+static uint8_t gnFioOspMem2[FIO_OSP_MEM];
+
+ADI_MEM_DATA_CRIT_CACHE
+static uint32_t ganFidFioOspMem[NUM_REMOTE_NODES][FIO_OSP_MEM_WORDS];
+
+/* Thread stack */
+ADI_MEM_DATA_CRIT_CACHE
+static uint8_t  ganInitThreadStack[6000];
+ADI_MEM_DATA_CRIT_CACHE
+static uint8_t  ganAppThreadStack1[4096];
+ADI_MEM_DATA_CRIT_CACHE
+static uint8_t  ganAppThreadStack2[4096];
+ADI_MEM_DATA_CRIT_CACHE
+static uint8_t  ganHouseKeepingThreadStack[4500];
+
+/* Task control blocks */
+ADI_MEM_DATA_CRIT_CACHE
+static uint8_t  ganInitThreadTcb[PRJ_OSAL_TCB_SIZE];
+ADI_MEM_DATA_CRIT_CACHE
+static uint8_t  ganAppThreadTcb1[PRJ_OSAL_TCB_SIZE];
+ADI_MEM_DATA_CRIT_CACHE
+static uint8_t  ganAppThreadTcb2[PRJ_OSAL_TCB_SIZE];
+ADI_MEM_DATA_CRIT_CACHE
+static uint8_t  ganHouseKeepingThreadTcb[PRJ_OSAL_TCB_SIZE];
+
+/* Configurations for the threads */
+ADI_MEM_DATA_CRIT_CACHE
+static PRJ_OSAL_THREAD_CFG goInitThreadCfg;
+ADI_MEM_DATA_CRIT_CACHE
+static PRJ_OSAL_THREAD_CFG goAppThreadCfg1;
+ADI_MEM_DATA_CRIT_CACHE
+static PRJ_OSAL_THREAD_CFG goAppThreadCfg2;
+ADI_MEM_DATA_CRIT_CACHE
+static PRJ_OSAL_THREAD_CFG goHouseKeepingThreadCfg;
+
+/* Thread handles */
+ADI_MEM_DATA_CRIT_CACHE
+static PRJ_OSAL_THREAD_HANDLE ghAppThread1;
+ADI_MEM_DATA_CRIT_CACHE
+static PRJ_OSAL_THREAD_HANDLE ghAppThread2;
+ADI_MEM_DATA_CRIT_CACHE
+static PRJ_OSAL_THREAD_HANDLE ghHouseKeepingThread;
+
+/* Console data */
+static uint32_t nFifoLvlData = 0U;
+static uint32_t gnCmdLineBuffer[100U];
+static ADI_FIO_OSP_PWM_DATA goPwmData;
+/* AD3304/AD3301 FID별 연결 상태 및 InitBidir 부여 노드주소
+ * index 0 = FID 0x00, index 7 = FID 0x07
+ * NUM_REMOTE_NODES=1 유지 — EAL은 슬롯 1개, FID 추적은 여기서 별도 관리 */
+static bool     gbAd3304Connected[8u] = {false,false,false,false,false,false,false,false};
+static uint16_t gnFidNodeAddr[8u]     = {0U,0U,0U,0U,0U,0U,0U,0U};
+static uint32_t gnFidRemoteNum[8u]    = {0U,0U,0U,0U,0U,0U,0U,0U};
+
+static bool gbOspBridgeMode = false;
+static bool gbOspBridgeInitialized = false;
+/* FioOspDeviceInit() 은 Connect 시 1회만 실행한다.
+ * TX 경로에서 재호출되더라도 RESET/INIT_BIDIR/SET_SETUP/GO_ACTIVE 를 반복하지 않도록 보호. */
+static bool gbFioOspDeviceInitialized = false;
+/* adi_pal_init() / adi_network_init() 은 프로세스 수명 동안 단 1회만 호출 가능.
+ * 재연결 시에는 이 플래그로 재호출을 건너뜀. */
+static bool gbSystemInitialized = false;
+static uint16_t gnOspBridgeDeviceAddress = INIT_DEV_ADDR;
+static char gsOspBridgeLastError[256] = "Not initialized";
+static char gsFioTrace[4096];
+static size_t gnFioTraceLen = 0U;
+/* PLCA Node ID – CreateE2bApp() 에서 설정한 값을 추적, OspBridge_SetNodeId() 로 변경 가능 */
+static uint8_t gnPlcaNodeId = 1U;
+
+#if defined(_WIN32)
+#define OSP_BRIDGE_API __declspec(dllexport)
+#define OSP_BRIDGE_CALL __stdcall
+#else
+#define OSP_BRIDGE_API
+#define OSP_BRIDGE_CALL
+#endif
+
+static void OspBridgeSetError(const char* pMsg)
+{
+    if (pMsg == NULL)
+    {
+        pMsg = "Unknown error";
+    }
+
+    (void)ADI_STRNCPY(gsOspBridgeLastError, pMsg, sizeof(gsOspBridgeLastError) - 1U);
+    gsOspBridgeLastError[sizeof(gsOspBridgeLastError) - 1U] = '\0';
+}
+
+static void FioTraceReset(void)
+{
+    gnFioTraceLen = 0U;
+    gsFioTrace[0] = '\0';
+}
+
+static void FioTraceAppend(const char* pMsg)
+{
+    if (pMsg == NULL || gnFioTraceLen >= (sizeof(gsFioTrace) - 1U))
+    {
+        return;
+    }
+
+    int n = snprintf(&gsFioTrace[gnFioTraceLen], sizeof(gsFioTrace) - gnFioTraceLen, "%s\r\n", pMsg);
+    if (n > 0)
+    {
+        size_t nAdd = (size_t)n;
+        size_t nRemain = sizeof(gsFioTrace) - gnFioTraceLen - 1U;
+        gnFioTraceLen += (nAdd < nRemain) ? nAdd : nRemain;
+        gsFioTrace[gnFioTraceLen] = '\0';
+    }
+}
+
+static void FioTraceAppendf(const char* pFmt, ...)
+{
+    char sLine[256];
+    va_list args;
+    va_start(args, pFmt);
+    (void)vsnprintf(sLine, sizeof(sLine), pFmt, args);
+    va_end(args);
+    sLine[sizeof(sLine) - 1U] = '\0';
+    FioTraceAppend(sLine);
+}
+/*=================================== CODE ==================================*/
+/**
+ * @brief The application main entry point
+ */
+ADI_MEM_CODE_NOCRIT
+int main(void)
+{
+#ifdef __NUCLEO_STM32__
+    /* Initialize the platform abstraction layer */
+    adi_pal_init();
+#endif /* __NUCLEO_STM32__ */
+
+    PRJ_OSAL_THREAD_HANDLE hThread;
+
+    goInitThreadCfg.bIsOneShot = true;
+    goInitThreadCfg.nPriority = PRJ_OSAL_THREAD_MAX_PRIORITY;
+    goInitThreadCfg.nStackSize = sizeof(ganInitThreadStack);
+    goInitThreadCfg.pStackMem = (void*)&ganInitThreadStack;
+    goInitThreadCfg.nTaskControlBlockSize = sizeof(ganInitThreadTcb);
+    goInitThreadCfg.pTaskControlBlockMem = (void*)&ganInitThreadTcb;
+    goInitThreadCfg.pArgument = NULL;
+    goInitThreadCfg.pfThread = InitThread;
+
+    prj_osal_createThread(&goInitThreadCfg, &hThread);
+
+    /* Start the scheduler. */
+    prj_osal_startScheduler();
+
+    /* Shouldn't reach here!! */
+    ADI_DBG_ERROR();
+
+    return 0;
+}
+
+/*=================================== STATIC ==================================*/
+/**
+ * @brief     Function for Init thread
+ *
+ * @param [in] arg Pointer for arguments
+ */
+ADI_MEM_CODE_CRIT
+static void InitThread(void* pArg)
+{
+    /* Initializes the network and configures MACPHY */
+    InitSystem();
+
+    /* Initializes E2b stack and configures the network */
+    CreateE2bApp();
+
+    /* Create application threads */
+    CreateThreads();
+}
+
+/** @brief Performs all the system initializations */
+ADI_MEM_CODE_CRIT
+static void InitSystem(void)
+{
+    uint32_t* pnNumDevices = NULL;
+    ADI_NETWORK_DEVINFO* paoNetworkDevInfo = NULL;
+    ADI_E2BCORE_VERSION oStackVersion;
+    ADI_E2BCORE_BUILD_INFO oBuildInfo;
+
+    /* Initialize the application data */
+    (void)ADI_MEMSET(&goAppData, 0, sizeof(APP_DATA));
+
+    /* ── 1회성 초기화 (프로세스 수명 동안 단 한 번) ────────────────────────
+     * adi_pal_init() / adi_network_init() 은 deinit 함수가 DLL에 없으므로
+     * 재연결 시 재호출하면 내부 mutex 데드락으로 영구 블로킹됨.
+     * gbSystemInitialized 플래그로 최초 1회만 실행한다.              */
+    if (!gbSystemInitialized)
+    {
+#ifndef __NUCLEO_STM32__
+        adi_pal_init();
+#endif
+
+        app_utils_init();
+
+        if (!gbOspBridgeMode)
+        {
+            app_utils_setupConsole();
+        }
+
+        ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT,
+            "\r\n===========================================================================\r\n");
+        ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "                 Example - FIO AMS-OSRAM OSP RGBi LED TEST \r\n\r\n");
+        ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, " This application uses SA_IF2 as TX (SIOP) and SA_IF3 as RX (SION) pin\r\n");
+        ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, " SIOP must be pulled high (VDD = 5V) on powerup via pull-up resistor ~2.2k & SION pulled to gnd\r\n");
+        ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, " This sets the communication mode to MCU \r\n");
+        ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "    Kodachi Tx'ing: SIO-P is data, Manchester Encoded - SIO-N Unused \r\n");
+        ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "    Kodachi Rx'ing: SIO-P is NRZ data - SIO-N is clock\r\n");
+        ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "===========================================================================\r\n\n");
+
+        adi_e2bcore_getBuildInfo(&oBuildInfo);
+        adi_e2bcore_getVersion(&oStackVersion);
+
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "App build time   : %s %s\r\n", __DATE__, __TIME__);
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "E2blib build time: %s\r\n", oBuildInfo.sBuildTime);
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "E2B Stack version: "UINT32_FORMATTER"."UINT32_FORMATTER"."UINT32_FORMATTER"\r\n\r\n",
+            oStackVersion.nMajorVersion, oStackVersion.nMinorVersion, oStackVersion.nPatchVersion);
+
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "Host name: %s \r\n", HOST_NAME_STR);
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "Os type: %s \r\n", OS_TYPE);
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "Initialization sequence started\r\n");
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "Platform Abstraction Layer initialized\r\n");
+
+        /* Initialize the network layer — 단 1회만 호출 */
+        adi_network_init();
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "Network layer initialized\r\n");
+
+        gbSystemInitialized = true;
+    }
+
+    /* ── 매 연결마다 실행 ─────────────────────────────────────────────────
+     * 콜백 재등록과 device open 은 Close 시 closeDevice 로 해제되므로
+     * 재연결마다 반드시 다시 설정해야 한다.                             */
+    adi_network_registerCallback(&adi_network_cbk);
+
+    /* Get the list of devices attached to the controller */
+    adi_network_getDevices(&pnNumDevices, &paoNetworkDevInfo);
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "Got the list of network devices\r\n");
+
+    for (uint32_t i = 0u; i < *pnNumDevices; i++)
+    {
+        ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "\tId: "UINT32_FORMATTER", Desc: %s\r\n", paoNetworkDevInfo[i].nId,
+            paoNetworkDevInfo[i].sDesc);
+    }
+
+    /* Set the controller's MAC address */
+    adi_network_setControllerMacAddr(oEth10BaseT1sNtwrkCfg.anMacAddr);
+
+    (void)ADI_MEMSET(&goMacPhyCfg, 0, sizeof(ADI_NETWORK_MACPHY_CFG));
+    goMacPhyCfg.nSpiFreq = 15000000U;
+    goMacPhyCfg.nClkPha = 0U;
+    goMacPhyCfg.nClkPol = 0U;
+    goMacPhyCfg.eCPS = ADI_NETWORK_CPS_32BYTES;
+    goMacPhyCfg.bFTSE = true;
+    goMacPhyCfg.bUse32BitTimestamp = false;
+    goMacPhyCfg.bRXCTE = false;
+    goMacPhyCfg.bTXCTE = false;
+    goMacPhyCfg.bGPTPCntrEn = false;
+    goMacPhyCfg.bMacTimer = false;
+    goMacPhyCfg.bEnableRxBufferOverflowInt = true;
+    goMacPhyCfg.bEnableSqiInt = false;
+    goMacPhyCfg.bEnableSscInt = false;
+    goMacPhyCfg.bEnableWkSlp = false;
+
+    adi_network_openDevice(ADI_NETWORK_DEV_IDX, &goMacPhyCfg);
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "Opened the network device: Id: "UINT32_FORMATTER", Desc: %s\r\n",
+        paoNetworkDevInfo[ADI_NETWORK_DEV_IDX].nId,
+        paoNetworkDevInfo[ADI_NETWORK_DEV_IDX].sDesc);
+
+#ifdef SNIFFER_MODE_EN
+    adi_network_openDevice(ADI_NETWORK_ETH_IDX, &goMacPhyCfg);
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "Opened the sniffer device: Id: "UINT32_FORMATTER", Desc: %s\r\n",
+        paoNetworkDevInfo[ADI_NETWORK_ETH_IDX].nId,
+        paoNetworkDevInfo[ADI_NETWORK_ETH_IDX].sDesc);
+    ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "Waiting for PHY link-up...\r\n");
+    adi_pal_waitMicroSec(5ULL * SEC_TO_US);
+#endif
+
+#if defined(__EV_SC594_SOM__)
+    adi_pal_platformLedSet(SOM_SC594_LED5, true);
+#endif
+}
+
+/** @brief Performs all the system initializations */
+ADI_MEM_CODE_CRIT
+static void CreateE2bApp(void)
+{
+    ADI_EAL_STATUS eEalStatus;
+
+    /* MAC 주소는 discovery 콜백에서 칩으로부터 자동 수신하므로 여기서는 0으로 초기화 */
+    (void)ADI_MEMSET(&ganRemoteMacAddrMap[0][0u], 0, sizeof(ganRemoteMacAddrMap));
+
+    goAppData.nMacCnt = 0U;
+    (void)ADI_MEMSET(&ganRemoteMacAddrMap[0][0u], 0, sizeof(ganRemoteMacAddrMap));
+    (void)memset(gbAd3304Connected, 0, sizeof(gbAd3304Connected));
+    (void)memset(gnFidNodeAddr, 0, sizeof(gnFidNodeAddr));
+
+    /* Initialize EAL */
+    adi_eal_init();
+
+    /* Create an instance of EAL mapping instance number with the device index */
+    adi_eal_createInstance(0U, ADI_NETWORK_DEV_IDX, &oEth10BaseT1sNtwrkCfg);
+
+#ifdef SNIFFER_MODE_EN
+    /* Enable frame duplication */
+    adi_eal_setFrameDuplication(0U, true);
+#endif
+
+    /* Register for EAL module callback */
+    adi_eal_registerCallback(0U, &EalTopCallbackFunc);
+
+    /* Register for node callbacks */
+    adi_eal_registerNodeCallback(0U, &EalRemoteNodeCbk);
+
+    /* PLCA NodeCnt = Controller(1) + AD3304 최대 8개 = 9
+     * 실제 연결된 수와 무관하게 최대값으로 설정 — 미연결 슬롯은 응답 없음으로 처리된다. */
+    adi_network_setPlca(ADI_NETWORK_DEV_IDX, true, MAX_PLCA_NODE_CNT, CTRL_PLCA_ID);
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 100ull * MS_TO_NS);
+
+    /* Do a LV die reset */
+    eEalStatus = adi_eal_resetRemoteLvDie(0U, ADI_EAL_ALL_REMOTES);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to reset remote nodes' LV die");
+    adi_network_flushTxTimed(ADI_EAL_LV_RESET_WAIT_TIME_NS);
+
+    /* Set the input enable for the SA_IF pins */
+    eEalStatus = adi_eal_setInputEnable(0U, ADI_EAL_ALL_REMOTES, 0xFFFU);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed set the input enable for the SA_IF pins");
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 0ULL);
+
+    /* Set bit to sample MAC address LSBs */
+    eEalStatus = adi_eal_setMacAddrSampling(0U, ADI_EAL_ALL_REMOTES, true);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Setting bit to sample mac address failed");
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 0ULL);
+
+    /* Enable PLCA for both the remote nodes */
+    eEalStatus = adi_eal_setPlcaEn(0U, ADI_EAL_ALL_REMOTES, true);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to enable PLCA");
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 0ULL);
+
+    /* Perform the discovery and register the MAC address of each remote */
+    eEalStatus = adi_eal_startDiscoverySeq(0U);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Disc sequence failed");
+    // Wait for discovery to finish
+    adi_network_flushTxTimed(ADI_EAL_DISC_TIMEOUT_NS);
+    // Stop the discovery sequence
+    eEalStatus = adi_eal_stopDiscoverySeq(0U);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Disc sequence failed");
+    ADI_DBG_ENSURE(goAppData.nMacCnt >= 1U, "Failed to discover required remote nodes");
+
+    /* discovery 완료 후 발견된 모든 FID에 PLCA ID 설정
+     * FID = MAC 마지막 바이트 (0x01~0x08) → PLCA ID = FID */
+    {
+        ADI_EAL_NODE_PLCA_ID_CFG oPlcaCfg;
+        for (uint32_t i = 0U; i < goAppData.nMacCnt; i++)
+        {
+            uint8_t nFid = ganRemoteMacAddrMap[i][5u];
+            if (nFid < 1U || nFid > 8U) { continue; }
+            oPlcaCfg.nMaskOfPlcaIdsUsed = 0x01U;
+            oPlcaCfg.anPlcaID[0U] = nFid;  /* PLCA ID = FID (1~8) */
+            (void)adi_eal_setRemotePlcaId(0U, &ganRemoteMacAddrMap[i][0u], &oPlcaCfg, 0x0U);
+        }
+        adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 0ULL);
+    }
+
+    /* Clear MAC addr sampling from SA_IF pins */
+    eEalStatus = adi_eal_setMacAddrSampling(0U, ADI_EAL_ALL_REMOTES, false);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to clear sample MAC address bit");
+
+    /* Read the revision number of the remotes */
+    eEalStatus = adi_eal_getRevision(0U, ADI_EAL_ALL_REMOTES);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to read revision number");
+    adi_network_flushTxTimed(10ULL * MS_TO_NS);
+
+    /* Configure the network */
+    eEalStatus = adi_eal_configureNetwork(0U);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to configure network");
+
+    /* Initialize EAL Diag module */
+    goEalDiagcfg.pfDiagCallback = &EalDiagCallback;
+    (void)adi_eal_diagInit(0U, &goEalDiagcfg);
+
+    PrintHelpContents();
+
+    FioOspDeviceInit();
+
+#if defined(__EV_SC594_SOM__)
+    adi_pal_platformLedSet(SOM_SC594_LED4, true);
+#endif
+}
+
+/**
+ * @brief Fixed-MAC variant of CreateE2bApp.
+ *
+ * 차이점 (vs CreateE2bApp):
+ *  1. ganRemoteMacAddrMap 을 MEMSET하지 않는다.
+ *     → OspBridge_InitFixed() 에서 미리 채운 고정 MAC이 보존된다.
+ *  2. setRemotePlcaId 를 startDiscovery 전에 먼저 호출한다.
+ *     → Power-On 직후 AD3301 이 기본 MAC으로 리셋된 상태에서도
+ *        PLCA 통신에 참여하여 discovery MAC 응답을 보낼 수 있다.
+ *  3. discovery 콜백은 수신 MAC을 무조건 등록하므로,
+ *     고정 MAC과 일치 여부 비교는 OspBridge_InitFixed() 가 담당한다.
+ */
+ADI_MEM_CODE_CRIT
+static void CreateE2bAppFixed(void)
+{
+    ADI_EAL_STATUS eEalStatus;
+
+    goAppData.nMacCnt = 0U;
+    (void)ADI_MEMSET(&ganRemoteMacAddrMap[0][0u], 0, sizeof(ganRemoteMacAddrMap));
+    (void)memset(gbAd3304Connected, 0, sizeof(gbAd3304Connected));
+    (void)memset(gnFidNodeAddr, 0, sizeof(gnFidNodeAddr));
+
+    /* ── MEMSET 생략 ── ganRemoteMacAddrMap 은 이미 고정 MAC으로 채워져 있음 */
+
+    /* Initialize EAL */
+    adi_eal_init();
+
+    /* Create an instance of EAL mapping instance number with the device index */
+    adi_eal_createInstance(0U, ADI_NETWORK_DEV_IDX, &oEth10BaseT1sNtwrkCfg);
+
+#ifdef SNIFFER_MODE_EN
+    adi_eal_setFrameDuplication(0U, true);
+#endif
+
+    /* Register for EAL module callback */
+    adi_eal_registerCallback(0U, &EalTopCallbackFunc);
+
+    /* Register for node callbacks */
+    adi_eal_registerNodeCallback(0U, &EalRemoteNodeCbk);
+
+    /* PLCA NodeCnt = MAX (Controller + AD3304 8개) */
+    adi_network_setPlca(ADI_NETWORK_DEV_IDX, true, MAX_PLCA_NODE_CNT, CTRL_PLCA_ID);
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 100ull * MS_TO_NS);
+
+    eEalStatus = adi_eal_resetRemoteLvDie(0U, ADI_EAL_ALL_REMOTES);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to reset remote nodes' LV die");
+    adi_network_flushTxTimed(ADI_EAL_LV_RESET_WAIT_TIME_NS);
+
+     /* Set the input enable for the SA_IF pins */
+    eEalStatus = adi_eal_setInputEnable(0U, ADI_EAL_ALL_REMOTES, 0xFFFU);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed set the input enable for the SA_IF pins");
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 0ULL);
+
+    /* Set bit to sample MAC address LSBs */
+    eEalStatus = adi_eal_setMacAddrSampling(0U, ADI_EAL_ALL_REMOTES, true);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Setting bit to sample mac address failed");
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 0ULL);
+
+    /* ── LINMaster 순서: setRemotePlcaId를 먼저 ──
+     * discovery 전에 고정 MAC 기반으로 PLCA ID를 설정해야
+     * AD3301이 PLCA 통신에 참여하여 discovery 응답을 보낸다. */
+    /* 이전 단일 setRemotePlcaId 제거 — 아래 루프로 통합 */
+
+    /* FID 0x00~0x07 MAC에도 PLCA ID 선행 등록 (연결된 보드가 응답할 수 있도록)
+     * REMOTE_MAC_BASE + FID = 실제 HW MAC (Power-On 기본값) */
+    {
+        uint8_t anFidMac[6u];
+        ADI_EAL_NODE_PLCA_ID_CFG oFidPlcaCfg;
+        for (uint8_t nFid = 0x01U; nFid <= 0x08U; nFid++)
+        {
+            app_utils_mac64To8(anFidMac, REMOTE_MAC_BASE + (uint64_t)nFid);
+            oFidPlcaCfg.nMaskOfPlcaIdsUsed = 0x01U;
+            oFidPlcaCfg.anPlcaID[0U] = nFid;  /* PLCA ID = FID (1~8) */
+            (void)adi_eal_setRemotePlcaId(0U, anFidMac, &oFidPlcaCfg, 0x0U);
+        }
+        adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 0ULL);
+    }
+
+    /* Enable PLCA for both the remote nodes */
+    eEalStatus = adi_eal_setPlcaEn(0U, ADI_EAL_ALL_REMOTES, true);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to enable PLCA");
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 0ULL);
+
+    /* Perform the discovery and register the MAC address of each remote */
+    eEalStatus = adi_eal_startDiscoverySeq(0U);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Disc sequence failed");
+    adi_network_flushTxTimed(ADI_EAL_DISC_TIMEOUT_NS);
+    eEalStatus = adi_eal_stopDiscoverySeq(0U);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Disc sequence stop failed");
+    ADI_DBG_ENSURE(goAppData.nMacCnt >= 1U, "Failed to discover required remote nodes");
+
+
+    /* Clear MAC addr sampling from SA_IF pins */
+    eEalStatus = adi_eal_setMacAddrSampling(0U, ADI_EAL_ALL_REMOTES, false);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to clear sample MAC address bit");
+
+    /* Read the revision number of the remotes */
+    eEalStatus = adi_eal_getRevision(0U, ADI_EAL_ALL_REMOTES);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to read revision number");
+    adi_network_flushTxTimed(10ULL * MS_TO_NS);
+
+    /* Configure the network */
+    eEalStatus = adi_eal_configureNetwork(0U);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to configure network");
+
+    /* Initialize EAL Diag module */
+    goEalDiagcfg.pfDiagCallback = &EalDiagCallback;
+    (void)adi_eal_diagInit(0U, &goEalDiagcfg);
+
+    PrintHelpContents();
+
+    FioOspDeviceInit();
+
+#if defined(__EV_SC594_SOM__)
+    adi_pal_platformLedSet(SOM_SC594_LED4, true);
+#endif
+}
+
+/**
+ * @brief 프로그램으로 설정한 MAC(ganRemoteMacAddrMap)으로 E2B/PLCA를 재구성합니다.
+ *        SA_IF 스위치 샘플링은 사용하지 않습니다 (스위치 값으로 덮어쓰지 않음).
+ *        호출 전 ganRemoteMacAddrMap 및 Eth10BaseT1sCfg_SetRemoteMac() 이 완료되어 있어야 합니다.
+ */
+ADI_MEM_CODE_CRIT
+static void CreateE2bAppProgrammed(void)
+{
+    ADI_EAL_STATUS eEalStatus;
+
+    adi_eal_init();
+    adi_eal_createInstance(0U, ADI_NETWORK_DEV_IDX, &oEth10BaseT1sNtwrkCfg);
+
+#ifdef SNIFFER_MODE_EN
+    adi_eal_setFrameDuplication(0U, true);
+#endif
+
+    adi_eal_registerCallback(0U, &EalTopCallbackFunc);
+    adi_eal_registerNodeCallback(0U, &EalRemoteNodeCbk);
+
+    adi_network_setPlca(ADI_NETWORK_DEV_IDX, true, MAX_PLCA_NODE_CNT, CTRL_PLCA_ID);
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 100ull * MS_TO_NS);
+
+    eEalStatus = adi_eal_setInputEnable(0U, ADI_EAL_ALL_REMOTES, 0xFFFU);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed set the input enable for the SA_IF pins");
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 0ULL);
+
+    /* 프로그램 MAC 경로: 스위치 샘플링 비활성 유지 */
+    eEalStatus = adi_eal_setMacAddrSampling(0U, ADI_EAL_ALL_REMOTES, false);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to disable MAC address sampling");
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 0ULL);
+
+    /* FID 0x01~0x08 전체에 PLCA ID 선행 등록 — programmed MAC 경로에서도 동일하게 처리 */
+    {
+        uint8_t anFidMac[6u];
+        ADI_EAL_NODE_PLCA_ID_CFG oFidPlcaCfg;
+        for (uint8_t nFid = 0x01U; nFid <= 0x08U; nFid++)
+        {
+            app_utils_mac64To8(anFidMac, REMOTE_MAC_BASE + (uint64_t)nFid);
+            oFidPlcaCfg.nMaskOfPlcaIdsUsed = 0x01U;
+            oFidPlcaCfg.anPlcaID[0U] = nFid;  /* PLCA ID = FID */
+            (void)adi_eal_setRemotePlcaId(0U, anFidMac, &oFidPlcaCfg, 0x0U);
+        }
+        adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 0ULL);
+    }
+
+    eEalStatus = adi_eal_setPlcaEn(0U, ADI_EAL_ALL_REMOTES, true);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to enable PLCA");
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 0ULL);
+
+    eEalStatus = adi_eal_startDiscoverySeq(0U);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Disc sequence failed");
+    adi_network_flushTxTimed(ADI_EAL_DISC_TIMEOUT_NS);
+    eEalStatus = adi_eal_stopDiscoverySeq(0U);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Disc sequence stop failed");
+    ADI_DBG_ENSURE(goAppData.nMacCnt >= 1U, "Failed to discover required remote nodes");
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to read revision number");
+    adi_network_flushTxTimed(10ULL * MS_TO_NS);
+
+    eEalStatus = adi_eal_configureNetwork(0U);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to configure network");
+
+    goEalDiagcfg.pfDiagCallback = &EalDiagCallback;
+    (void)adi_eal_diagInit(0U, &goEalDiagcfg);
+
+    FioOspDeviceInit();
+}
+
+/**
+ * @brief FIO-OSP 를 닫고 E2B 스택을 내렸다가 ganRemoteMacAddrMap 기준으로 다시 올립니다.
+ * @return 0=성공, 음수=오류
+ */
+ADI_MEM_CODE_CRIT
+static void OspBridge_CloseFioHandlesOnly(void)
+{
+    if (ghFioOspHandle != NULL)
+    {
+        (void)adi_eal_fioOspClose(ghFioOspHandle);
+        ghFioOspHandle = NULL;
+    }
+
+    if (ghFioMcastHandle != NULL)
+    {
+        (void)adi_eal_fioOspClose(ghFioMcastHandle);
+        ghFioMcastHandle = NULL;
+    }
+
+    for (uint32_t i = 0U; i < NUM_REMOTE_NODES; i++)
+    {
+        if (gahFidFioOspHandle[i] != NULL)
+        {
+            (void)adi_eal_fioOspClose(gahFidFioOspHandle[i]);
+            gahFidFioOspHandle[i] = NULL;
+        }
+    }
+
+    ghFioOspHandle2 = NULL;
+    for (uint32_t i = 0U; i < NUM_REMOTE_NODES; i++) { ganMcastHandles[i] = NULL; }
+    (void)ADI_MEMSET(&goMcastCfg, 0, sizeof(goMcastCfg));
+    (void)ADI_MEMSET(gnFioMcastMem, 0, sizeof(gnFioMcastMem));
+    gbFioOspDeviceInitialized = false;
+}
+
+static uint64_t OspBridge_Mac6To64(const uint8_t* pMac6)
+{
+    if (pMac6 == NULL)
+    {
+        return 0ULL;
+    }
+
+    return ((uint64_t)pMac6[0U] << 40U) |
+           ((uint64_t)pMac6[1U] << 32U) |
+           ((uint64_t)pMac6[2U] << 24U) |
+           ((uint64_t)pMac6[3U] << 16U) |
+           ((uint64_t)pMac6[4U] <<  8U) |
+           ((uint64_t)pMac6[5U]);
+}
+
+static void OspBridge_Mac64To6(uint64_t nMac, uint8_t* pMac6)
+{
+    if (pMac6 == NULL)
+    {
+        return;
+    }
+
+    pMac6[0U] = (uint8_t)((nMac >> 40U) & 0xFFU);
+    pMac6[1U] = (uint8_t)((nMac >> 32U) & 0xFFU);
+    pMac6[2U] = (uint8_t)((nMac >> 24U) & 0xFFU);
+    pMac6[3U] = (uint8_t)((nMac >> 16U) & 0xFFU);
+    pMac6[4U] = (uint8_t)((nMac >>  8U) & 0xFFU);
+    pMac6[5U] = (uint8_t)( nMac         & 0xFFU);
+}
+
+ADI_MEM_CODE_CRIT
+static int OspBridge_ReinitE2bAndOsp(void)
+{
+    /* ★ 재초기화 전 플래그 리셋 — FioOspDeviceInit 이 다시 실행되도록 */
+    OspBridge_CloseFioHandlesOnly();
+
+    adi_eal_terminateInstance(0U);
+    goAppData.nMacCnt = 0U;
+
+    CreateE2bAppProgrammed();
+    if (goAppData.nMacCnt == 0U)
+    {
+        OspBridgeSetError("E2B rediscovery failed after programmed MAC change");
+        return -3;
+    }
+
+    FioOspDeviceInit();
+    return 0;
+}
+
+/**
+* @brief Create threads for application and housekeeping tasks
+*
+*/
+ADI_MEM_CODE_CRIT
+static void CreateThreads(void)
+{
+
+
+    ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "\r\n\r\nSwitching to run mode\r\n");
+    goAppData.eAppMode = APP_MODE_RUN;
+
+    goAppThreadCfg1.bIsOneShot = false;
+    goAppThreadCfg1.nPriority = 2;
+    goAppThreadCfg1.nStackSize = sizeof(ganAppThreadStack1);
+    goAppThreadCfg1.pStackMem = (void*)&ganAppThreadStack1;
+    goAppThreadCfg1.nTaskControlBlockSize = sizeof(ganAppThreadTcb1);
+    goAppThreadCfg1.pTaskControlBlockMem = (void*)&ganAppThreadTcb1;
+    goAppThreadCfg1.pArgument = NULL;
+    goAppThreadCfg1.pfThread = AppThread1Fxn;
+
+    goAppThreadCfg2.bIsOneShot = false;
+    goAppThreadCfg2.nPriority = 2;
+    goAppThreadCfg2.nStackSize = sizeof(ganAppThreadStack2);
+    goAppThreadCfg2.pStackMem = (void*)&ganAppThreadStack2;
+    goAppThreadCfg2.nTaskControlBlockSize = sizeof(ganAppThreadTcb2);
+    goAppThreadCfg2.pTaskControlBlockMem = (void*)&ganAppThreadTcb2;
+    goAppThreadCfg2.pArgument = NULL;
+    goAppThreadCfg2.pfThread = AppThread2Fxn;
+
+    goHouseKeepingThreadCfg.bIsOneShot = false;
+    goHouseKeepingThreadCfg.nPriority = 1;
+    goHouseKeepingThreadCfg.nStackSize = sizeof(ganHouseKeepingThreadStack);
+    goHouseKeepingThreadCfg.pStackMem = (void*)&ganHouseKeepingThreadStack;
+    goHouseKeepingThreadCfg.nTaskControlBlockSize = sizeof(ganHouseKeepingThreadTcb);
+    goHouseKeepingThreadCfg.pTaskControlBlockMem = (void*)&ganHouseKeepingThreadTcb;
+    goHouseKeepingThreadCfg.pArgument = NULL;
+    goHouseKeepingThreadCfg.pfThread = HouseKeepingFxn;
+
+    prj_osal_createThread(&goAppThreadCfg1, &ghAppThread1);
+    prj_osal_createThread(&goAppThreadCfg2, &ghAppThread2);
+    prj_osal_createThread(&goHouseKeepingThreadCfg, &ghHouseKeepingThread);
+}
+
+/**
+ * @brief      Application thread1 function
+ *
+ * @param [in] arg Pointer for arguments
+ */
+ADI_MEM_CODE_CRIT
+static void AppThread1Fxn(void* pArg)
+{
+    /* OspBridge 모드(PC → DLL 직접 제어)에서는 C# 측 SetColorRgbByNode/SetColorRgb가
+     * PWM 전송을 담당한다. 스레드가 자체 FioOspSetPwm()을 반복 호출하면 C# TX와
+     * 충돌하여 불필요한 Init 시퀀스(RESET→INIT_BIDIR→SET_SETUP→GO_ACTIVE)가
+     * 매 색상 전환마다 버스에 재전송되므로, OspBridge 모드에서는 실행을 건너뜀. */
+    if (!gbOspBridgeMode && goAppData.eAppMode == APP_MODE_RUN)
+    {
+        FioOspSetPwm();
+    }
+
+    prj_osal_sleepThread(ghAppThread1, 1000U);
+}
+
+/**
+ * @brief      Application thread2 function
+ *
+ * @param [in] arg Pointer for arguments
+ */
+ADI_MEM_CODE_CRIT
+static void AppThread2Fxn(void* pArg)
+{
+    /* OspBridge 모드에서는 자동 ReadPwm 루프를 비활성화한다.
+     * FioOspReadPwm()이 발행하는 READ_PWM/READ_TEMP 프레임이
+     * C# SetColorRgbByNode TX 사이에 삽입되어 패킷 오염을 유발한다. */
+    if (!gbOspBridgeMode && goAppData.eAppMode == APP_MODE_RUN)
+    {
+        FioOspReadPwm();
+    }
+
+    prj_osal_sleepThread(ghAppThread2, 1000U);
+}
+
+/**
+ * @brief      Function for housekeeping tasks
+ *
+ * @param [in] arg Pointer for arguments
+ */
+static void HouseKeepingFxn(void* pArg)
+{
+    /* Function that sends out the frames, clearing the buffer.
+    This must be periodically called to actually send out the frames */
+    adi_network_run();
+
+    /* See if there is some console data to be sent or processed */
+    ConsoleRun();
+}
+
+ADI_MEM_CODE_CRIT
+static void ConsoleRun(void)
+{
+    bool bCmdProcessed = app_utils_consoleRun(ADI_NETWORK_DEV_IDX, &goAppData.eAppCmd, &goAppData.eAppMode);
+
+    if (!bCmdProcessed)
+    {
+        /* Process any application specific command here */
+        if (goAppData.eAppCmd == APP_CMD_INTF_STAT)
+        {
+            /* Interface stats for all the enabled interfaces */
+            ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "\r\n");
+            ADI_PAL_LOG(ADI_CONSOLE_PROMPT, " ");
+            adi_eal_fioOspReadStatus(ghFioOspHandle);
+        }
+    }
+
+    goAppData.eAppCmd = APP_CMD_NONE;
+}
+
+
+ADI_MEM_CODE_CRIT
+static void PrintHelpContents(void)
+{
+    app_utils_printHelpContents();
+}
+
+static void FioOspResetFidDiag(void)
+{
+    for (uint32_t i = 0U; i < NUM_REMOTE_NODES; i++)
+    {
+        gaFidFioDiag[i].nOpen = -99;
+        gaFidFioDiag[i].nCallback = -99;
+        gaFidFioDiag[i].nInstRAM = -99;
+        gaFidFioDiag[i].nReset = -99;
+        gaFidFioDiag[i].nInitBidir = -99;
+        gaFidFioDiag[i].nAssignedAddr = 0;
+        gaFidFioDiag[i].nSetSetup = -99;
+        gaFidFioDiag[i].nSetState = -99;
+        gaFidFioDiag[i].nHandleValid = 0;
+        gahFidFioOspHandle[i] = NULL;
+        gnFidNodeAddr[i] = 0U;
+        gnFidRemoteNum[i] = i;
+    }
+}
+
+static uint32_t FioOspMarkDiscoveredFids(void)
+{
+    uint32_t nMask = 0U;
+
+    for (uint32_t i = 0U; i < NUM_REMOTE_NODES; i++)
+    {
+        uint8_t nFid = ganRemoteMacAddrMap[i][5U];
+        if ((ganRemoteMacAddrMap[i][0U] == 0U) &&
+            (ganRemoteMacAddrMap[i][1U] == 0U) &&
+            (ganRemoteMacAddrMap[i][2U] == 0U) &&
+            (ganRemoteMacAddrMap[i][3U] == 0U) &&
+            (ganRemoteMacAddrMap[i][4U] == 0U) &&
+            (ganRemoteMacAddrMap[i][5U] == 0U))
+        {
+            continue;
+        }
+        FioTraceAppendf("DISC idx=%u MAC=%02X:%02X:%02X:%02X:%02X:%02X last=0x%02X",
+            (unsigned)i,
+            ganRemoteMacAddrMap[i][0U], ganRemoteMacAddrMap[i][1U],
+            ganRemoteMacAddrMap[i][2U], ganRemoteMacAddrMap[i][3U],
+            ganRemoteMacAddrMap[i][4U], ganRemoteMacAddrMap[i][5U],
+            (unsigned)nFid);
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT,
+            "[DIAG] DISC idx=%u MAC=%02X:%02X:%02X:%02X:%02X:%02X last=0x%02X\r\n",
+            (unsigned)i,
+            ganRemoteMacAddrMap[i][0U], ganRemoteMacAddrMap[i][1U],
+            ganRemoteMacAddrMap[i][2U], ganRemoteMacAddrMap[i][3U],
+            ganRemoteMacAddrMap[i][4U], ganRemoteMacAddrMap[i][5U],
+            (unsigned)nFid);
+        if ((nFid >= 0x01U) && (nFid <= 0x08U))
+        {
+            gbAd3304Connected[nFid - 1U] = true;
+            gnFidRemoteNum[nFid - 1U] = (uint32_t)(nFid - 1U);
+            FioTraceAppendf("DISC map FID=0x%02X -> discIdx=%u fioRemote=%u PLCA=%u",
+                (unsigned)nFid, (unsigned)i, (unsigned)gnFidRemoteNum[nFid - 1U], (unsigned)nFid);
+            ADI_PAL_LOG(ADI_CONSOLE_PROMPT,
+                "[DIAG] DISC map FID=0x%02X -> discIdx=%u fioRemote=%u PLCA=%u\r\n",
+                (unsigned)nFid, (unsigned)i, (unsigned)gnFidRemoteNum[nFid - 1U], (unsigned)nFid);
+        }
+        else
+        {
+            FioTraceAppendf("DISC ignore idx=%u: MAC last byte is not FID 0x01..0x08",
+                (unsigned)i);
+            ADI_PAL_LOG(ADI_CONSOLE_PROMPT,
+                "[DIAG] DISC ignore idx=%u: MAC last byte is not FID 0x01..0x08\r\n",
+                (unsigned)i);
+        }
+    }
+
+    for (uint32_t i = 0U; i < NUM_REMOTE_NODES; i++)
+    {
+        if (gbAd3304Connected[i])
+        {
+            nMask |= (1UL << i);
+        }
+    }
+
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT,
+        "[DIAG] FID discovery map: nMacCnt=%u mask=0x%02X remote=[%u,%u,%u,%u,%u,%u,%u,%u]\r\n",
+        (unsigned)goAppData.nMacCnt, (unsigned)nMask,
+        (unsigned)gnFidRemoteNum[0], (unsigned)gnFidRemoteNum[1],
+        (unsigned)gnFidRemoteNum[2], (unsigned)gnFidRemoteNum[3],
+        (unsigned)gnFidRemoteNum[4], (unsigned)gnFidRemoteNum[5],
+        (unsigned)gnFidRemoteNum[6], (unsigned)gnFidRemoteNum[7]);
+    FioTraceAppendf("FID discovery map: nMacCnt=%u mask=0x%02X remote=[%u,%u,%u,%u,%u,%u,%u,%u]",
+        (unsigned)goAppData.nMacCnt, (unsigned)nMask,
+        (unsigned)gnFidRemoteNum[0], (unsigned)gnFidRemoteNum[1],
+        (unsigned)gnFidRemoteNum[2], (unsigned)gnFidRemoteNum[3],
+        (unsigned)gnFidRemoteNum[4], (unsigned)gnFidRemoteNum[5],
+        (unsigned)gnFidRemoteNum[6], (unsigned)gnFidRemoteNum[7]);
+
+    return nMask;
+}
+
+static bool FioOspAnyFidHandleOpen(void)
+{
+    for (uint32_t i = 0U; i < NUM_REMOTE_NODES; i++)
+    {
+        if (gahFidFioOspHandle[i] != NULL)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static ADI_EAL_STATUS FioOspInitFid(uint32_t nFidIdx)
+{
+    ADI_EAL_STATUS eEalStatus;
+    ADI_EAL_FIO_OSP_CFG oFioCfg;
+    ADI_FIO_OSP_SETUP_REG oSetupReg;
+    uint16_t nDeviceAddress = BROADCAST_DEV_ADDR;
+    uint8_t nReqId = (uint8_t)(0x20U + nFidIdx);
+
+    (void)ADI_MEMSET(&oFioCfg, 0, sizeof(oFioCfg));
+    oFioCfg.nInstNum = 0U;
+    oFioCfg.nRemoteNum = gnFidRemoteNum[nFidIdx];
+    oFioCfg.nIntfNum = 0U;
+    oFioCfg.nFioOspCfgQDepth = FIO_OSP_QUEUE_DEPTH;
+    oFioCfg.nFioOspMemorySize = FIO_OSP_MEM;
+    oFioCfg.pFioOspMemory = (uint8_t*)&ganFidFioOspMem[nFidIdx][0U];
+
+    (void)ADI_MEMSET((uint8_t*)&ganFidFioOspMem[nFidIdx][0U], 0, FIO_OSP_MEM);
+
+    {
+        uint32_t nRemote = gnFidRemoteNum[nFidIdx];
+        const uint8_t* pMac = (nRemote < NUM_REMOTE_NODES) ? &ganRemoteMacAddrMap[nRemote][0U] : NULL;
+        if (pMac != NULL)
+        {
+            FioTraceAppendf("FID=0x%02X FIO cfg remote=%u intf=%u PLCA=%u MAC=%02X:%02X:%02X:%02X:%02X:%02X",
+                (unsigned)(nFidIdx + 1U), (unsigned)oFioCfg.nRemoteNum,
+                (unsigned)oFioCfg.nIntfNum, (unsigned)(nFidIdx + 1U),
+                pMac[0U], pMac[1U], pMac[2U], pMac[3U], pMac[4U], pMac[5U]);
+            ADI_PAL_LOG(ADI_CONSOLE_PROMPT,
+                "[DIAG] FID=0x%02X FIO cfg remote=%u intf=%u PLCA=%u MAC=%02X:%02X:%02X:%02X:%02X:%02X\r\n",
+                (unsigned)(nFidIdx + 1U), (unsigned)oFioCfg.nRemoteNum,
+                (unsigned)oFioCfg.nIntfNum, (unsigned)(nFidIdx + 1U),
+                pMac[0U], pMac[1U], pMac[2U], pMac[3U], pMac[4U], pMac[5U]);
+        }
+        else
+        {
+            FioTraceAppendf("FID=0x%02X FIO cfg remote=%u intf=%u PLCA=%u MAC=<out-of-range>",
+                (unsigned)(nFidIdx + 1U), (unsigned)oFioCfg.nRemoteNum,
+                (unsigned)oFioCfg.nIntfNum, (unsigned)(nFidIdx + 1U));
+            ADI_PAL_LOG(ADI_CONSOLE_PROMPT,
+                "[DIAG] FID=0x%02X FIO cfg remote=%u intf=%u PLCA=%u MAC=<out-of-range>\r\n",
+                (unsigned)(nFidIdx + 1U), (unsigned)oFioCfg.nRemoteNum,
+                (unsigned)oFioCfg.nIntfNum, (unsigned)(nFidIdx + 1U));
+        }
+    }
+
+    eEalStatus = adi_eal_fioOspOpen(&oFioCfg, &gahFidFioOspHandle[nFidIdx]);
+    gaFidFioDiag[nFidIdx].nOpen = (int)eEalStatus;
+    gaFidFioDiag[nFidIdx].nHandleValid = (gahFidFioOspHandle[nFidIdx] != NULL) ? 1 : 0;
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT,
+        "[DIAG] FID=0x%02X fioOspOpen remote=%u intf=%u status=%d handle=%p\r\n",
+        (unsigned)(nFidIdx + 1U), (unsigned)oFioCfg.nRemoteNum, (unsigned)oFioCfg.nIntfNum,
+        (int)eEalStatus, (void*)gahFidFioOspHandle[nFidIdx]);
+    FioTraceAppendf("FID=0x%02X fioOspOpen remote=%u intf=%u status=%d handle=%p",
+        (unsigned)(nFidIdx + 1U), (unsigned)oFioCfg.nRemoteNum, (unsigned)oFioCfg.nIntfNum,
+        (int)eEalStatus, (void*)gahFidFioOspHandle[nFidIdx]);
+    if (eEalStatus != ADI_EAL_STATUS_SUCCESS) { return eEalStatus; }
+
+    eEalStatus = adi_eal_fioOspRegisterCallback(gahFidFioOspHandle[nFidIdx], EalFioOspCallBack);
+    gaFidFioDiag[nFidIdx].nCallback = (int)eEalStatus;
+    if (eEalStatus != ADI_EAL_STATUS_SUCCESS) { return eEalStatus; }
+
+    eEalStatus = adi_eal_fioOspConfigureInstructionRAM(gahFidFioOspHandle[nFidIdx], ADI_EAL_FIO_OSP_CLK_2_4_MHZ);
+    gaFidFioDiag[nFidIdx].nInstRAM = (int)eEalStatus;
+    if (eEalStatus != ADI_EAL_STATUS_SUCCESS) { return eEalStatus; }
+
+    (void)adi_eal_fioOspResetQueue(gahFidFioOspHandle[nFidIdx]);
+
+    eEalStatus = adi_fioOspResetCmd(gahFidFioOspHandle[nFidIdx], (uint16_t)BROADCAST_DEV_ADDR, nReqId);
+    gaFidFioDiag[nFidIdx].nReset = (int)eEalStatus;
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT,
+        "[DIAG] FID=0x%02X ResetCmd remote=%u intf=%u req=0x%02X status=%d\r\n",
+        (unsigned)(nFidIdx + 1U), (unsigned)oFioCfg.nRemoteNum,
+        (unsigned)oFioCfg.nIntfNum, (unsigned)nReqId, (int)eEalStatus);
+    FioTraceAppendf("FID=0x%02X ResetCmd remote=%u intf=%u req=0x%02X status=%d",
+        (unsigned)(nFidIdx + 1U), (unsigned)oFioCfg.nRemoteNum,
+        (unsigned)oFioCfg.nIntfNum, (unsigned)nReqId, (int)eEalStatus);
+    if (eEalStatus != ADI_EAL_STATUS_SUCCESS) { return eEalStatus; }
+
+    eEalStatus = adi_fioOspInitBidir(gahFidFioOspHandle[nFidIdx], &nDeviceAddress, (uint8_t)(nReqId + 1U));
+    gaFidFioDiag[nFidIdx].nInitBidir = (int)eEalStatus;
+    gaFidFioDiag[nFidIdx].nAssignedAddr = (int)nDeviceAddress;
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT,
+        "[DIAG] FID=0x%02X InitBidir remote=%u intf=%u req=0x%02X status=%d addr=%u\r\n",
+        (unsigned)(nFidIdx + 1U), (unsigned)oFioCfg.nRemoteNum,
+        (unsigned)oFioCfg.nIntfNum, (unsigned)(uint8_t)(nReqId + 1U),
+        (int)eEalStatus, (unsigned)nDeviceAddress);
+    FioTraceAppendf("FID=0x%02X InitBidir remote=%u intf=%u req=0x%02X status=%d addr=%u",
+        (unsigned)(nFidIdx + 1U), (unsigned)oFioCfg.nRemoteNum,
+        (unsigned)oFioCfg.nIntfNum, (unsigned)(uint8_t)(nReqId + 1U),
+        (int)eEalStatus, (unsigned)nDeviceAddress);
+    if (eEalStatus != ADI_EAL_STATUS_SUCCESS)
+    {
+        uint8_t nRetryReq = (uint8_t)(0x80U + nFidIdx);
+        FioTraceAppendf("FID=0x%02X InitBidir retry after status=%d", (unsigned)(nFidIdx + 1U), (int)eEalStatus);
+        (void)adi_eal_fioOspResetQueue(gahFidFioOspHandle[nFidIdx]);
+        adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 20ULL * MS_TO_NS);
+
+        eEalStatus = adi_fioOspResetCmd(gahFidFioOspHandle[nFidIdx], (uint16_t)BROADCAST_DEV_ADDR, nRetryReq);
+        gaFidFioDiag[nFidIdx].nReset = (int)eEalStatus;
+        FioTraceAppendf("FID=0x%02X Retry ResetCmd remote=%u intf=%u req=0x%02X status=%d",
+            (unsigned)(nFidIdx + 1U), (unsigned)oFioCfg.nRemoteNum,
+            (unsigned)oFioCfg.nIntfNum, (unsigned)nRetryReq, (int)eEalStatus);
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT,
+            "[DIAG] FID=0x%02X Retry ResetCmd remote=%u intf=%u req=0x%02X status=%d\r\n",
+            (unsigned)(nFidIdx + 1U), (unsigned)oFioCfg.nRemoteNum,
+            (unsigned)oFioCfg.nIntfNum, (unsigned)nRetryReq, (int)eEalStatus);
+        if (eEalStatus != ADI_EAL_STATUS_SUCCESS) { return eEalStatus; }
+
+        nDeviceAddress = BROADCAST_DEV_ADDR;
+        eEalStatus = adi_fioOspInitBidir(gahFidFioOspHandle[nFidIdx], &nDeviceAddress, (uint8_t)(nRetryReq + 1U));
+        gaFidFioDiag[nFidIdx].nInitBidir = (int)eEalStatus;
+        gaFidFioDiag[nFidIdx].nAssignedAddr = (int)nDeviceAddress;
+        FioTraceAppendf("FID=0x%02X Retry InitBidir remote=%u intf=%u req=0x%02X status=%d addr=%u",
+            (unsigned)(nFidIdx + 1U), (unsigned)oFioCfg.nRemoteNum,
+            (unsigned)oFioCfg.nIntfNum, (unsigned)(uint8_t)(nRetryReq + 1U),
+            (int)eEalStatus, (unsigned)nDeviceAddress);
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT,
+            "[DIAG] FID=0x%02X Retry InitBidir remote=%u intf=%u req=0x%02X status=%d addr=%u\r\n",
+            (unsigned)(nFidIdx + 1U), (unsigned)oFioCfg.nRemoteNum,
+            (unsigned)oFioCfg.nIntfNum, (unsigned)(uint8_t)(nRetryReq + 1U),
+            (int)eEalStatus, (unsigned)nDeviceAddress);
+    }
+    if (eEalStatus != ADI_EAL_STATUS_SUCCESS) { return eEalStatus; }
+
+    gnFidNodeAddr[nFidIdx] = nDeviceAddress;
+    if (gnOspBridgeDeviceAddress == 0U)
+    {
+        gnOspBridgeDeviceAddress = nDeviceAddress;
+    }
+
+    oSetupReg.ePwmFreq = ADI_FIO_OSP_PWM_FREQ_586HZ;
+    oSetupReg.bClkInv = false;
+    oSetupReg.bCrcEnable = true;
+    oSetupReg.eTempUpdateRate = ADI_FIO_OSP_TEMP_UPDATE_RATE_2_4_KHZ;
+    oSetupReg.bShouldDevSleeponComErr = false;
+    oSetupReg.bShouldDevSleeponLOSErr = false;
+    oSetupReg.bShouldDevSleeponOverTemperature = true;
+    oSetupReg.bShouldDevSleeponUnderVoltage = false;
+
+    eEalStatus = adi_fioOspSetSetup(gahFidFioOspHandle[nFidIdx], nDeviceAddress, &oSetupReg, (uint8_t)(nReqId + 2U));
+    gaFidFioDiag[nFidIdx].nSetSetup = (int)eEalStatus;
+    if (eEalStatus != ADI_EAL_STATUS_SUCCESS) { return eEalStatus; }
+
+    eEalStatus = adi_fioOspSetState(gahFidFioOspHandle[nFidIdx], nDeviceAddress, FIO_OSP_SET_STATE_ACTIVE, (uint8_t)(nReqId + 3U));
+    gaFidFioDiag[nFidIdx].nSetState = (int)eEalStatus;
+    if (eEalStatus != ADI_EAL_STATUS_SUCCESS) { return eEalStatus; }
+
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 5ULL * MS_TO_NS);
+    return ADI_EAL_STATUS_SUCCESS;
+}
+
+ADI_MEM_CODE_CRIT
+static void FioOspDeviceInit(void)
+{
+    /* ★ Connect 시 1회만 실행 — TX 경로에서 재호출되어도 Init 반복 방지 */
+    if (gbFioOspDeviceInitialized)
+    {
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FioOspDeviceInit skipped (already initialized)\r\n");
+        return;
+    }
+
+    ADI_EAL_STATUS eEalStatus;
+
+#if OSP_FIO1_ONLY_TEST
+    {
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO1-only test mode: skip FIO0, init nIntfNum=1 only\r\n");
+
+        goFioDiag.nFio0Open = -77;
+        goFioDiag.nFio0Callback = -77;
+        goFioDiag.nFio0InstRAM = -77;
+        goFioDiag.nFio0Reset = -77;
+        goFioDiag.nFio0InitBidir = -77;
+        goFioDiag.nFio0AssignedAddr = 0;
+        goFioDiag.nFio0SetSetup = -77;
+        goFioDiag.nFio0SetState = -77;
+        goFioDiag.nFio0HandleValid = 0;
+        ghFioOspHandle = NULL;
+
+        FioOspResetFidDiag();
+        FioTraceReset();
+        ghFioOspHandle2 = NULL;
+        gnOspBridgeDeviceAddress = 0U;
+        (void)FioOspMarkDiscoveredFids();
+
+        {
+            uint32_t nInitCount = 0U;
+            uint32_t nFirstActiveIdx = NUM_REMOTE_NODES;
+
+            for (uint32_t nDiscIdx = 0U; nDiscIdx < NUM_REMOTE_NODES; nDiscIdx++)
+            {
+                uint8_t nFid = ganRemoteMacAddrMap[nDiscIdx][5U];
+                if (nFid < 0x01U || nFid > 0x08U)
+                {
+                    continue;
+                }
+
+                uint32_t nFidIdx = (uint32_t)(nFid - 1U);
+                if (!gbAd3304Connected[nFidIdx] || gahFidFioOspHandle[nFidIdx] != NULL)
+                {
+                    continue;
+                }
+
+                FioTraceAppendf("FIO init order discIdx=%u -> FID=0x%02X remote=%u",
+                    (unsigned)nDiscIdx, (unsigned)nFid, (unsigned)gnFidRemoteNum[nFidIdx]);
+                eEalStatus = FioOspInitFid(nFidIdx);
+                if (eEalStatus != ADI_EAL_STATUS_SUCCESS)
+                {
+                    ADI_PAL_LOG(ADI_CONSOLE_PROMPT,
+                        "[DIAG] FID=0x%02X FIO init failed status=%d\r\n",
+                        (unsigned)(nFidIdx + 1U), (int)eEalStatus);
+                    gnFidNodeAddr[nFidIdx] = 0U;
+                    continue;
+                }
+
+                if (nFirstActiveIdx == NUM_REMOTE_NODES)
+                {
+                    nFirstActiveIdx = nFidIdx;
+                    ghFioOspHandle2 = gahFidFioOspHandle[nFidIdx];
+                }
+                nInitCount++;
+            }
+
+            if (nFirstActiveIdx < NUM_REMOTE_NODES)
+            {
+                goFioDiag.nFio1Open = gaFidFioDiag[nFirstActiveIdx].nOpen;
+                goFioDiag.nFio1Callback = gaFidFioDiag[nFirstActiveIdx].nCallback;
+                goFioDiag.nFio1InstRAM = gaFidFioDiag[nFirstActiveIdx].nInstRAM;
+                goFioDiag.nFio1Reset = gaFidFioDiag[nFirstActiveIdx].nReset;
+                goFioDiag.nFio1InitBidir = gaFidFioDiag[nFirstActiveIdx].nInitBidir;
+                goFioDiag.nFio1AssignedAddr = gaFidFioDiag[nFirstActiveIdx].nAssignedAddr;
+                goFioDiag.nFio1SetSetup = gaFidFioDiag[nFirstActiveIdx].nSetSetup;
+                goFioDiag.nFio1SetState = gaFidFioDiag[nFirstActiveIdx].nSetState;
+                goFioDiag.nFio1HandleValid = gaFidFioDiag[nFirstActiveIdx].nHandleValid;
+            }
+
+            ADI_PAL_LOG(ADI_CONSOLE_PROMPT,
+                "[DIAG] FID FIO init complete: %u AD3304 active, firstFID=0x%02X\r\n",
+                (unsigned)nInitCount,
+                (nFirstActiveIdx < NUM_REMOTE_NODES) ? (unsigned)(nFirstActiveIdx + 1U) : 0U);
+
+            gbFioOspDeviceInitialized = (nInitCount > 0U);
+
+            /* ── Multicast 그룹 생성 (OSP_FIO1_ONLY_TEST=1 경로) ── */
+            if (nInitCount > 0U)
+            {
+                uint16_t nMcastCount = 0U;
+                for (uint32_t i = 0U; i < NUM_REMOTE_NODES; i++) { ganMcastHandles[i] = NULL; }
+                for (uint32_t i = 0U; i < NUM_REMOTE_NODES; i++)
+                    if (gahFidFioOspHandle[i] != NULL)
+                        ganMcastHandles[nMcastCount++] = gahFidFioOspHandle[i];
+                if (nMcastCount > 0U)
+                {
+                    (void)ADI_MEMSET(&goMcastCfg, 0, sizeof(goMcastCfg));
+                    goMcastCfg.nNumInst           = nMcastCount;
+                    goMcastCfg.pahFioOspHandles   = &ganMcastHandles[0U];
+                    goMcastCfg.nIntfTopic         = ADI_E2BCORE_TOPIC_INTF0;
+                    goMcastCfg.nFifoTopic         = ADI_E2BCORE_TOPIC_FIFO0;
+                    goMcastCfg.poIfRegVlanTag      = NULL;
+                    goMcastCfg.poFifoRegVlanTag    = NULL;
+                    goMcastCfg.poFifoWriteVlanTag  = NULL;
+                    goMcastCfg.nFioOspMcastMemSize = ADI_EAL_FIO_OSP_MCAST_GROUP_MEM_SIZE(nMcastCount);
+                    goMcastCfg.pFioOspMcastMem     = &gnFioMcastMem[0U];
+                    ADI_EAL_STATUS eMcSt = adi_eal_fioOspCreateMcastGroup(&goMcastCfg, &ghFioMcastHandle);
+                    ADI_PAL_LOG(ADI_CONSOLE_PROMPT,
+                        "[MCAST] CreateMcastGroup: %u handles, status=%d, handle=%p\r\n",
+                        (unsigned)nMcastCount, eMcSt, (void*)ghFioMcastHandle);
+                    if (eMcSt != ADI_EAL_STATUS_SUCCESS) { ghFioMcastHandle = NULL; }
+                    else { adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 20ULL * MS_TO_NS); }
+                }
+            }
+            return;
+        }
+
+        ADI_EAL_FIO_OSP_CFG oEalFioOspCfg2;
+        (void)ADI_MEMSET(&oEalFioOspCfg2, 0, sizeof(oEalFioOspCfg2));
+        oEalFioOspCfg2.nInstNum = 0U;
+        oEalFioOspCfg2.nRemoteNum = 0U;
+        oEalFioOspCfg2.nIntfNum = 1U;
+        oEalFioOspCfg2.nFioOspCfgQDepth = FIO_OSP_QUEUE_DEPTH; /* ★ 20→60: unicast 연속 TX 큐 오버플로우 방지 */
+        oEalFioOspCfg2.nFioOspMemorySize = FIO_OSP_MEM;
+        oEalFioOspCfg2.pFioOspMemory = &gnFioOspMem2[0U];
+
+        /* ★ Open() 직전 버퍼 초기화 (FIO0/FIO1 일반 경로와 동일한 이유) */
+        (void)ADI_MEMSET(&gnFioOspMem2[0U], 0, FIO_OSP_MEM);
+
+        eEalStatus = adi_eal_fioOspOpen(&oEalFioOspCfg2, &ghFioOspHandle2);
+        goFioDiag.nFio1Open = (int)eEalStatus;
+        goFioDiag.nFio1HandleValid = (ghFioOspHandle2 != NULL) ? 1 : 0;
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO1-only fioOspOpen       status=%d handle=%p\r\n", eEalStatus, (void*)ghFioOspHandle2);
+        ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to open FIO OSP (FIO1-only)");
+
+        eEalStatus = adi_eal_fioOspRegisterCallback(ghFioOspHandle2, EalFioOspCallBack);
+        goFioDiag.nFio1Callback = (int)eEalStatus;
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO1-only registerCallback  status=%d\r\n", eEalStatus);
+        ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to register callback for FIO OSP (FIO1-only)");
+
+        eEalStatus = adi_eal_fioOspConfigureInstructionRAM(ghFioOspHandle2, ADI_EAL_FIO_OSP_CLK_2_4_MHZ);
+        goFioDiag.nFio1InstRAM = (int)eEalStatus;
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO1-only configureInstRAM   status=%d\r\n", eEalStatus);
+        ADI_DBG_REQUIRE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to configure instruction ram for OSP (FIO1-only)");
+
+        eEalStatus = adi_eal_fioOspResetQueue(ghFioOspHandle2);
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO1-only ResetQueue(force)  status=%d\r\n", eEalStatus);
+
+        eEalStatus = adi_fioOspResetCmd(ghFioOspHandle2, (uint16_t)(BROADCAST_DEV_ADDR), 0x0U);
+        goFioDiag.nFio1Reset = (int)eEalStatus;
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO1-only ResetCmd           status=%d\r\n", eEalStatus);
+        ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to send Reset command (FIO1-only)");
+
+        /* FID별 순차 InitBidir: discovery에서 gbAd3304Connected가 설정된 FID만 처리
+         * gnFidNodeAddr[FID-1]에 부여된 노드주소 저장 → SetColorRgbByFid unicast에 사용 */
+        {
+            ADI_FIO_OSP_SETUP_REG oSetupFid;
+            oSetupFid.ePwmFreq = ADI_FIO_OSP_PWM_FREQ_586HZ;
+            oSetupFid.bClkInv = false;
+            oSetupFid.bCrcEnable = true;
+            oSetupFid.eTempUpdateRate = ADI_FIO_OSP_TEMP_UPDATE_RATE_2_4_KHZ;
+            oSetupFid.bShouldDevSleeponComErr = false;
+            oSetupFid.bShouldDevSleeponLOSErr = false;
+            oSetupFid.bShouldDevSleeponOverTemperature = true;
+            oSetupFid.bShouldDevSleeponUnderVoltage = false;
+
+            uint32_t nInitCount = 0U;
+            for (uint32_t nFidIdx = 0U; nFidIdx < 8U; nFidIdx++)
+            {
+                if (!gbAd3304Connected[nFidIdx]) { gnFidNodeAddr[nFidIdx] = 0U; continue; }
+
+                uint8_t nFid = (uint8_t)(nFidIdx + 1U);  /* 실제 FID: 1~8 */
+                uint16_t nAddr = (uint16_t)BROADCAST_DEV_ADDR;
+                eEalStatus = adi_fioOspInitBidir(ghFioOspHandle2, &nAddr, 0x2U);
+                ADI_PAL_LOG(ADI_CONSOLE_PROMPT,
+                    "[DIAG] FID=0x%02X InitBidir status=%d addr=%u\r\n",
+                    (unsigned)nFid, (int)eEalStatus, (unsigned)nAddr);
+                if (eEalStatus != ADI_EAL_STATUS_SUCCESS)
+                { gnFidNodeAddr[nFidIdx] = 0U; continue; }
+
+                gnFidNodeAddr[nFidIdx] = nAddr;
+                if (nInitCount == 0U) { gnOspBridgeDeviceAddress = nAddr; }
+                nInitCount++;
+
+                eEalStatus = adi_fioOspSetSetup(ghFioOspHandle2, nAddr, &oSetupFid, 0x4DU);
+                ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FID=0x%02X SetSetup status=%d\r\n",
+                    (unsigned)nFid, (int)eEalStatus);
+                eEalStatus = adi_fioOspSetState(ghFioOspHandle2, nAddr, FIO_OSP_SET_STATE_ACTIVE, 0x4U);
+                ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FID=0x%02X SetState status=%d\r\n",
+                    (unsigned)nFid, (int)eEalStatus);
+                adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 5ULL * MS_TO_NS);
+            }
+            goFioDiag.nFio1InitBidir    = (nInitCount > 0U) ? 0 : -1;
+            goFioDiag.nFio1AssignedAddr = (int)gnOspBridgeDeviceAddress;
+            ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO1 init complete: %u FID connected\r\n",
+                (unsigned)nInitCount);
+        }
+
+
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO1-only init complete. FIO1=%p\r\n", (void*)ghFioOspHandle2);
+        gbFioOspDeviceInitialized = true;
+        return;
+    }
+#endif
+
+    /* ── FIO0 초기화 (IF6/IF7, SAIF6/SAIF7) ── */
+    (void)ADI_MEMSET(&goEalFioOspCfg, 0, sizeof(goEalFioOspCfg));
+    goEalFioOspCfg.nInstNum = 0U;
+    goEalFioOspCfg.nRemoteNum = 0U;
+    goEalFioOspCfg.nIntfNum = 0U;    /* FIO0 = IF6/IF7 */
+    goEalFioOspCfg.nFioOspCfgQDepth = FIO_OSP_QUEUE_DEPTH; /* ★ 20→60: unicast 연속 TX 큐 오버플로우 방지 */
+    goEalFioOspCfg.nFioOspMemorySize = FIO_OSP_MEM;
+    goEalFioOspCfg.pFioOspMemory = &gnFioOspMem[0U];
+
+    /* ★ Open() 직전에 버퍼를 초기화해야 한다.
+     *   Open() 이후에 memset하면 EAL이 Open 시 설정한 내부 큐 구조체를
+     *   덮어써서 AVE(AccessViolationException)가 발생한다.
+     *   반드시 Open() 호출 전에 버퍼를 클리어해야 이전 세션의
+     *   잔류 상태 없이 EAL이 깨끗하게 초기화된다. */
+    (void)ADI_MEMSET(&gnFioOspMem[0U], 0, FIO_OSP_MEM);
+
+    eEalStatus = adi_eal_fioOspOpen(&goEalFioOspCfg, &ghFioOspHandle);
+    goFioDiag.nFio0Open = (int)eEalStatus;
+    goFioDiag.nFio0HandleValid = (ghFioOspHandle != NULL) ? 1 : 0;
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO0 fioOspOpen       status=%d handle=%p\r\n", eEalStatus, (void*)ghFioOspHandle);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to open FIO OSP (FIO0)");
+
+    eEalStatus = adi_eal_fioOspRegisterCallback(ghFioOspHandle, EalFioOspCallBack);
+    goFioDiag.nFio0Callback = (int)eEalStatus;
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO0 registerCallback  status=%d\r\n", eEalStatus);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to register callback for FIO OSP (FIO0)");
+
+    eEalStatus = adi_eal_fioOspConfigureInstructionRAM(ghFioOspHandle, ADI_EAL_FIO_OSP_CLK_2_4_MHZ);
+    goFioDiag.nFio0InstRAM = (int)eEalStatus;
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO0 configureInstRAM   status=%d\r\n", eEalStatus);
+    ADI_DBG_REQUIRE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to configure instruction ram for OSP (FIO0)");
+
+    eEalStatus = adi_eal_fioOspResetQueue(ghFioOspHandle);
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO0 ResetQueue(force)  status=%d\r\n", eEalStatus);
+
+    eEalStatus = adi_fioOspResetCmd(ghFioOspHandle, (uint16_t)(BROADCAST_DEV_ADDR), 0x0U);
+    goFioDiag.nFio0Reset = (int)eEalStatus;
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO0 ResetCmd           status=%d\r\n", eEalStatus);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to send Reset command (FIO0)");
+
+    /* OSP Init Bidirectional — FIO0 */
+    uint16_t nDeviceAddress = BROADCAST_DEV_ADDR;
+    ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "Initialising Bidir (FIO0 / IF6-IF7)\r\n");
+    eEalStatus = adi_fioOspInitBidir(ghFioOspHandle, &nDeviceAddress, 0x2U);
+    goFioDiag.nFio0InitBidir = (int)eEalStatus;
+    goFioDiag.nFio0AssignedAddr = (int)nDeviceAddress;
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO0 InitBidir          status=%d assignedAddr=%d\r\n", eEalStatus, (int)nDeviceAddress);
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "OSP INIT Status (FIO0) %d \r\n", eEalStatus);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to send Init Bidirectional command (FIO0)");
+    gnOspBridgeDeviceAddress = nDeviceAddress;
+
+    /* OSP Set Register Setup — FIO0 */
+    ADI_FIO_OSP_SETUP_REG oSetupReg;
+    oSetupReg.ePwmFreq = ADI_FIO_OSP_PWM_FREQ_586HZ;
+    oSetupReg.bClkInv = false;
+    oSetupReg.bCrcEnable = true;
+    oSetupReg.eTempUpdateRate = ADI_FIO_OSP_TEMP_UPDATE_RATE_2_4_KHZ;
+    oSetupReg.bShouldDevSleeponComErr = false;
+    oSetupReg.bShouldDevSleeponLOSErr = false;
+    oSetupReg.bShouldDevSleeponOverTemperature = true;
+    oSetupReg.bShouldDevSleeponUnderVoltage = false;
+
+    eEalStatus = adi_fioOspSetSetup(ghFioOspHandle, (uint16_t)(BROADCAST_DEV_ADDR), &oSetupReg, 0x4DU);
+    goFioDiag.nFio0SetSetup = (int)eEalStatus;
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO0 SetSetup           status=%d\r\n", eEalStatus);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to send setup command (FIO0)");
+
+    eEalStatus = adi_fioOspSetState(ghFioOspHandle, nDeviceAddress, FIO_OSP_SET_STATE_ACTIVE, 0x4U);
+    goFioDiag.nFio0SetState = (int)eEalStatus;
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO0 SetState(ACTIVE)   status=%d\r\n", eEalStatus);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to send Go Active command (FIO0)");
+
+    /* ★ FIO0 명령이 버스로 완전히 전송될 때까지 대기.
+     *   flush 없이 바로 FIO1 초기화를 시작하면 FIO0 의 SetState 프레임이
+     *   아직 큐에 남아 있는 상태에서 FIO1 의 ResetCmd 가 쌓여
+     *   큐 오버플로우(error 12) 가 발생한다. */
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 10ULL * MS_TO_NS);
+
+    /* ── FIO1 초기화 (IF4/IF5, SAIF4/SAIF5) ── */
+    ADI_EAL_FIO_OSP_CFG oEalFioOspCfg2;
+    (void)ADI_MEMSET(&oEalFioOspCfg2, 0, sizeof(oEalFioOspCfg2));
+    oEalFioOspCfg2.nInstNum = 0U;
+    oEalFioOspCfg2.nRemoteNum = 0U;
+    oEalFioOspCfg2.nIntfNum = 1U;    /* FIO1 = IF4/IF5 */
+    oEalFioOspCfg2.nFioOspCfgQDepth = FIO_OSP_QUEUE_DEPTH; /* ★ 20→60: unicast 연속 TX 큐 오버플로우 방지 */
+    oEalFioOspCfg2.nFioOspMemorySize = FIO_OSP_MEM;
+    oEalFioOspCfg2.pFioOspMemory = &gnFioOspMem2[0U];
+
+    /* ★ FIO0 와 동일: Open() 직전에 버퍼 초기화 */
+    (void)ADI_MEMSET(&gnFioOspMem2[0U], 0, FIO_OSP_MEM);
+
+    eEalStatus = adi_eal_fioOspOpen(&oEalFioOspCfg2, &ghFioOspHandle2);
+    goFioDiag.nFio1Open = (int)eEalStatus;
+    goFioDiag.nFio1HandleValid = (ghFioOspHandle2 != NULL) ? 1 : 0;
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO1 fioOspOpen       status=%d handle=%p\r\n", eEalStatus, (void*)ghFioOspHandle2);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to open FIO OSP (FIO1)");
+
+    eEalStatus = adi_eal_fioOspRegisterCallback(ghFioOspHandle2, EalFioOspCallBack);
+    goFioDiag.nFio1Callback = (int)eEalStatus;
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO1 registerCallback  status=%d\r\n", eEalStatus);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to register callback for FIO OSP (FIO1)");
+
+    eEalStatus = adi_eal_fioOspConfigureInstructionRAM(ghFioOspHandle2, ADI_EAL_FIO_OSP_CLK_2_4_MHZ);
+    goFioDiag.nFio1InstRAM = (int)eEalStatus;
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO1 configureInstRAM   status=%d\r\n", eEalStatus);
+    ADI_DBG_REQUIRE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to configure instruction ram for OSP (FIO1)");
+
+    eEalStatus = adi_eal_fioOspResetQueue(ghFioOspHandle2);
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO1 ResetQueue(force)  status=%d\r\n", eEalStatus);
+
+    eEalStatus = adi_fioOspResetCmd(ghFioOspHandle2, (uint16_t)(BROADCAST_DEV_ADDR), 0x0U);
+    goFioDiag.nFio1Reset = (int)eEalStatus;
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO1 ResetCmd           status=%d\r\n", eEalStatus);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to send Reset command (FIO1)");
+
+    /* OSP Init Bidirectional — FIO1 */
+    uint16_t nDeviceAddress2 = BROADCAST_DEV_ADDR;
+    ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "Initialising Bidir (FIO1 / IF4-IF5)\r\n");
+    eEalStatus = adi_fioOspInitBidir(ghFioOspHandle2, &nDeviceAddress2, 0x2U);
+    goFioDiag.nFio1InitBidir = (int)eEalStatus;
+    goFioDiag.nFio1AssignedAddr = (int)nDeviceAddress2;
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO1 InitBidir          status=%d assignedAddr=%d\r\n", eEalStatus, (int)nDeviceAddress2);
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "OSP INIT Status (FIO1) %d \r\n", eEalStatus);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to send Init Bidirectional command (FIO1)");
+
+    /* OSP Set Register Setup — FIO1 */
+    ADI_FIO_OSP_SETUP_REG oSetupReg2;
+    oSetupReg2.ePwmFreq = ADI_FIO_OSP_PWM_FREQ_586HZ;
+    oSetupReg2.bClkInv = false;
+    oSetupReg2.bCrcEnable = true;
+    oSetupReg2.eTempUpdateRate = ADI_FIO_OSP_TEMP_UPDATE_RATE_2_4_KHZ;
+    oSetupReg2.bShouldDevSleeponComErr = false;
+    oSetupReg2.bShouldDevSleeponLOSErr = false;
+    oSetupReg2.bShouldDevSleeponOverTemperature = true;
+    oSetupReg2.bShouldDevSleeponUnderVoltage = false;
+
+    eEalStatus = adi_fioOspSetSetup(ghFioOspHandle2, (uint16_t)(BROADCAST_DEV_ADDR), &oSetupReg2, 0x4DU);
+    goFioDiag.nFio1SetSetup = (int)eEalStatus;
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO1 SetSetup           status=%d\r\n", eEalStatus);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to send setup command (FIO1)");
+
+    eEalStatus = adi_fioOspSetState(ghFioOspHandle2, nDeviceAddress2, FIO_OSP_SET_STATE_ACTIVE, 0x4U);
+    goFioDiag.nFio1SetState = (int)eEalStatus;
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FIO1 SetState(ACTIVE)   status=%d\r\n", eEalStatus);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to send Go Active command (FIO1)");
+
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] FioOspDeviceInit complete. FIO0=%p FIO1=%p\r\n",
+        (void*)ghFioOspHandle, (void*)ghFioOspHandle2);
+
+    /* ── Multicast 그룹 생성: 연결된 핸들 묶어서 FID=0x00 broadcast 1회 전송 ── */
+    {
+        uint16_t nMcastCount = 0U;
+        for (uint32_t i = 0U; i < NUM_REMOTE_NODES; i++) { ganMcastHandles[i] = NULL; }
+        for (uint32_t i = 0U; i < NUM_REMOTE_NODES; i++)
+            if (gahFidFioOspHandle[i] != NULL)
+                ganMcastHandles[nMcastCount++] = gahFidFioOspHandle[i];
+        if (nMcastCount > 0U)
+        {
+            (void)ADI_MEMSET(&goMcastCfg, 0, sizeof(goMcastCfg));
+            goMcastCfg.nNumInst           = nMcastCount;
+            goMcastCfg.pahFioOspHandles   = &ganMcastHandles[0U];
+            goMcastCfg.nIntfTopic         = ADI_E2BCORE_TOPIC_INTF0;
+            goMcastCfg.nFifoTopic         = ADI_E2BCORE_TOPIC_FIFO0;
+            goMcastCfg.poIfRegVlanTag      = NULL;
+            goMcastCfg.poFifoRegVlanTag    = NULL;
+            goMcastCfg.poFifoWriteVlanTag  = NULL;
+            goMcastCfg.nFioOspMcastMemSize = ADI_EAL_FIO_OSP_MCAST_GROUP_MEM_SIZE(nMcastCount);
+            goMcastCfg.pFioOspMcastMem     = &gnFioMcastMem[0U];
+            ADI_EAL_STATUS eMcSt = adi_eal_fioOspCreateMcastGroup(&goMcastCfg, &ghFioMcastHandle);
+            ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[MCAST] CreateMcastGroup: %u handles, status=%d, handle=%p\r\n",
+                (unsigned)nMcastCount, eMcSt, (void*)ghFioMcastHandle);
+            if (eMcSt != ADI_EAL_STATUS_SUCCESS) { ghFioMcastHandle = NULL; }
+            else { adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 20ULL * MS_TO_NS); }
+        }
+    }
+    gbFioOspDeviceInitialized = true;
+}
+
+ADI_MEM_CODE_CRIT
+static void FioOspSetPwm(void)
+{
+    goPwmData.nBluePwm = LED_INTENSITY * colorBlue[colorNbr];
+    goPwmData.bBlueDayMode = true;
+    goPwmData.nGreenPwm = LED_INTENSITY * colorGreen[colorNbr];
+    goPwmData.bGreenDayMode = true;
+    goPwmData.nRedPwm = LED_INTENSITY * colorRed[colorNbr];
+    goPwmData.bRedDayMode = true;
+
+    ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "| R % 4d | G % 4d | B % 4d |\r\n",
+        goPwmData.nRedPwm,
+        goPwmData.nGreenPwm,
+        goPwmData.nBluePwm);
+
+    colorNbr++;
+    if (colorNbr >= COLOR_COUNT_MAX)
+        colorNbr = 0;
+
+    ADI_EAL_STATUS eEalStatus;
+    uint16_t nDeviceAddress = BROADCAST_DEV_ADDR; // Broadcast address
+    eEalStatus = adi_fioOspSetPwm(ghFioOspHandle, nDeviceAddress, &goPwmData, 0x4FU);
+    ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to send pwm command");
+}
+
+ADI_MEM_CODE_CRIT
+static void FioOspReadPwm(void)
+{
+    ADI_EAL_STATUS eEalStatus;
+    ADI_FIO_OSP_PWM_DATA oPwmData;
+    uint16_t nDeviceAddress;
+    double dTemperature;
+    ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "-----------------------------------\r\n");
+    ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "| DEVICE |  R  |  G  |  B  | TEMP |\r\n");
+    ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "-----------------------------------\r\n");
+
+    for (uint8_t i = 1u; i < NUM_LEDS + 1u; i++)
+    {
+        nDeviceAddress = i;
+        eEalStatus = adi_fioOspReadPwm(ghFioOspHandle, nDeviceAddress, &oPwmData, 0x4EU);
+        eEalStatus = adi_fioOspReadTemp(ghFioOspHandle, nDeviceAddress, &dTemperature, 0x48u);
+        ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "| % 4d   | % 4d| % 4d| % 4d|% 4.2f|\r\n", i, oPwmData.nRedPwm, oPwmData.nGreenPwm, oPwmData.nBluePwm, dTemperature);
+        ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "-----------------------------------\r\n\r\n");
+        ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to read pwm command");
+    }
+}
+
+/*================================= CALLBACKS =================================*/
+/** EAL Top level callback */
+ADI_MEM_CODE_CRIT
+static void EalTopCallbackFunc(uint32_t nInstNum, ADI_EAL_CBK_EVT eTopCbkEvent, const void* pArg)
+{
+    ADI_EAL_STATUS eEalStatus;
+
+    switch (eTopCbkEvent)
+    {
+    case ADI_EAL_CBK_EVT_MAC_ADDR_RCVD:
+    {
+        uint8_t* panMacAddr = (uint8_t*)pArg;
+        uint8_t nFid = panMacAddr[5u];
+
+        /* 스위치 설정과 무관하게 discovery 에서 수신된 실제 MAC을 바로 등록 */
+        if (nFid >= 0x01U && nFid <= 0x08U)
+        {
+            uint32_t i = (uint32_t)(nFid - 1U);
+            if (!gbAd3304Connected[i])
+            {
+                goAppData.nMacCnt++;
+            }
+            (void)memcpy(&ganRemoteMacAddrMap[i][0u], panMacAddr, 6U);
+            Eth10BaseT1sCfg_SetRemoteMacByIdx(i, panMacAddr);
+            eEalStatus = adi_eal_writeMacAddr(nInstNum, i, panMacAddr);
+            ADI_DBG_ENSURE(eEalStatus == ADI_EAL_STATUS_SUCCESS, "Failed to update the MAC address");
+            gbAd3304Connected[i] = true;
+        }
+
+        /* FID = MAC 마지막 바이트 (0x01~0x08) → 연결 상태 기록 */
+        {
+            uint8_t nFid = panMacAddr[5u];
+            if (nFid >= 0x01U && nFid <= 0x08U)
+            {
+                gbAd3304Connected[nFid - 1U] = true;  /* 배열 인덱스: 0~7 */
+                ADI_PAL_LOG(ADI_CONSOLE_PROMPT,
+                    "[AD3304] FID=0x%02X MAC=%02X:%02X:%02X:%02X:%02X:%02X 연결 O\r\n",
+                    (unsigned)nFid,
+                    panMacAddr[0], panMacAddr[1], panMacAddr[2],
+                    panMacAddr[3], panMacAddr[4], panMacAddr[5]);
+            }
+        }
+
+        break;
+    }
+
+    case ADI_EAL_CBK_EVT_ERR:
+    default:
+    {
+        ADI_DBG_ERROR();
+        break;
+    }
+    }
+}
+
+/** EAL Node level callback */
+ADI_MEM_CODE_CRIT
+static void EalRemoteNodeCbk(uint32_t nInstNum, uint32_t nRemoteNum, ADI_EAL_NODE_CBK_EVT eRemoteCbkEvent,
+    const void* pArg)
+{
+    switch (eRemoteCbkEvent)
+    {
+    case ADI_EAL_NODE_CBK_EVT_PING_RCVD:
+    {
+        app_utils_logPingRcvd(nRemoteNum);
+        break;
+    }
+
+    case ADI_EAL_NODE_CBK_EVT_ERR:
+    {
+        ADI_DBG_ERROR();
+        break;
+
+    }
+
+    case ADI_EAL_NODE_CBK_EVT_REVNUM_RCVD:
+    {
+        ADI_EAL_NODE_REV_NUM* poEalRevNum = (ADI_EAL_NODE_REV_NUM*)pArg;
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "Remote" UINT32_FORMATTER "  Major Revision Number: 0x" UINT32_HEX_FORMATTER
+            ", Minor Revision Number: 0x" UINT32_HEX_FORMATTER "\r\n",
+            nRemoteNum + 1U, poEalRevNum->nMajorRevNum, poEalRevNum->nMinorRevNum);
+        break;
+    }
+
+    default:
+    {
+        break;
+    }
+    }
+}
+
+static void EalFioOspCallBack(uint32_t nInstNum, ADI_EAL_FIO_OSP_HANDLE hFioOspHandle, ADI_EAL_FIO_OSP_CBK_EVT eCbkEventType,
+    const void* pArg)
+{
+    switch (eCbkEventType)
+    {
+    case ADI_EAL_FIO_OSP_CBK_EVT_REG_READ_RESP:
+    {
+        ADI_E2BCORE_REGMAP_IO_CONFIG* poRegData = (ADI_E2BCORE_REGMAP_IO_CONFIG*)pArg;
+        ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "Register read response: Reg: 0x%02X, Data: 0x%04X\r\n",
+            poRegData->anStartAddr, poRegData->pBuffer[0U]);
+        break;
+    }
+
+    case ADI_EAL_FIO_OSP_CBK_EVT_INTF_STATUS_EVT:
+    {
+        EAL_FIO_OSP_DATA* poEalFioOspData = (EAL_FIO_OSP_DATA*)hFioOspHandle;
+        EAL_FIO_OSP_INST_DATA* poEalFioOspInstData = poEalFioOspData->apoInstData[0U];
+        ADI_EAL_FIO_OSP_CBK_EVT_INTF_STATUS_EVT_DATA* poStatsDat = (ADI_EAL_FIO_OSP_CBK_EVT_INTF_STATUS_EVT_DATA*)pArg;
+        ADI_PAL_LOG(ADI_CONSOLE_NO_PROMPT, "Remote " UINT32_FORMATTER " FIO OSP interface status: \r\n",
+            poEalFioOspInstData->oId.nRemoteNum + 1U);
+        adi_eal_diagLogFlexibleIOStatus(poStatsDat);
+        app_utils_addLineSeparator(true);
+        break;
+    }
+
+    default:
+    {
+        break;
+    }
+    }
+}
+
+/* =========================================================================
+ * OspBridge_InitFixed
+ *
+ * Power-On 직후 AD3301이 기본 MAC(REMOTE1_MAC_ADDR)으로 리셋된 상태에서도
+ * 반드시 연결되는 Init 함수입니다.
+ *
+ * LINMaster_FT4222 방식과 동일하게:
+ *   ganRemoteMacAddrMap 을 고정 MAC(REMOTE1_MAC_ADDR)으로 미리 채운 뒤
+ *   CreateE2bApp() 을 호출합니다.
+ *   Discovery 콜백에서 수신 MAC을 그 값과 비교하여 일치하면 등록 성공.
+ *
+ * 성공 후 OspBridge_GetMacNode() 로 실제 MAC을 읽어
+ *   - 고정 MAC과 같으면: 그대로 계속 사용
+ *   - 다르면: OspBridge_Close() → OspBridge_Init() (discovery 방식) 으로 재시도
+ *
+ * @return 0=성공, -2=discovery 실패, -3=FIO handle 없음
+ * ========================================================================= */
+OSP_BRIDGE_API int OSP_BRIDGE_CALL OspBridge_InitFixed(void)
+{
+    if (gbOspBridgeInitialized)
+    {
+        return 0;
+    }
+
+    /* ── 기본 Power-On MAC을 슬롯 0에 설정 (레퍼런스 방식 유지) ── */
+    app_utils_mac64To8(&ganRemoteMacAddrMap[APP_REMOTE_1][0u], REMOTE1_MAC_ADDR);
+
+    gbOspBridgeMode = true;
+    OspBridgeSetError("Initializing AD3306/AD3301 OSP bridge (fixed MAC mode)");
+    InitSystem();
+    CreateE2bAppFixed();  /* ← MEMSET 생략 + setRemotePlcaId 先行 버전 */
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[InitFixed] discovery nMacCnt=%u\r\n", (unsigned)goAppData.nMacCnt);
+    if (goAppData.nMacCnt == 0U)
+    {
+        OspBridgeSetError("AD3306 remote discovery failed: no node found");
+        return -2;
+    }
+
+#if OSP_FIO1_ONLY_TEST
+    if (!FioOspAnyFidHandleOpen())
+    {
+        OspBridgeSetError("No FID FIO OSP handle was opened");
+        return -3;
+    }
+#else
+    if (ghFioOspHandle == NULL || ghFioOspHandle2 == NULL)
+    {
+        OspBridgeSetError("FIO OSP handle was not opened");
+        return -3;
+    }
+#endif
+
+    /* ★ HouseKeeping/AppThread 생성 — Close() 후 재연결 시 스케줄러 컨텍스트가
+     *   소멸되므로 반드시 재생성해야 한다.
+     *   누락 시 adi_network_run()이 호출되지 않아 프레임 큐가 flush되지 않고
+     *   OSAL mutex 접근 시 AccessViolationException이 발생한다. */
+    CreateThreads();
+
+    goAppData.eAppMode = APP_MODE_RUN;
+    gbOspBridgeInitialized = true;
+    OspBridgeSetError("OK");
+    return 0;
+}
+
+OSP_BRIDGE_API int OSP_BRIDGE_CALL OspBridge_InitOtp(void)
+{
+    if (gbOspBridgeInitialized)
+    {
+        return 0;
+    }
+
+    gbOspBridgeMode = true;
+    OspBridgeSetError("Initializing AD3306/AD3301 OSP bridge (OTP MAC mode)");
+    InitSystem();
+    CreateE2bAppProgrammed();
+    if (goAppData.nMacCnt == 0U)
+    {
+        OspBridgeSetError("AD3306 remote discovery failed in OTP MAC mode");
+        return -2;
+    }
+
+#if OSP_FIO1_ONLY_TEST
+    if (!FioOspAnyFidHandleOpen())
+    {
+        OspBridgeSetError("No FID FIO OSP handle was opened");
+        return -3;
+    }
+#else
+    if (ghFioOspHandle == NULL || ghFioOspHandle2 == NULL)
+    {
+        OspBridgeSetError("FIO OSP handle was not opened");
+        return -3;
+    }
+#endif
+
+    CreateThreads();
+
+    goAppData.eAppMode = APP_MODE_RUN;
+    gbOspBridgeInitialized = true;
+    OspBridgeSetError("OK");
+    return 0;
+}
+
+OSP_BRIDGE_API int OSP_BRIDGE_CALL OspBridge_Init(void)
+{
+    if (gbOspBridgeInitialized)
+    {
+        return 0;
+    }
+
+    gbOspBridgeMode = true;
+    OspBridgeSetError("Initializing AD3306/AD3301 OSP bridge");
+    InitSystem();
+    CreateE2bApp();
+    if (goAppData.nMacCnt == 0U)
+    {
+        OspBridgeSetError("AD3306 remote discovery failed");
+        return -2;
+    }
+
+#if OSP_FIO1_ONLY_TEST
+    if (!FioOspAnyFidHandleOpen())
+    {
+        OspBridgeSetError("No FID FIO OSP handle was opened");
+        return -3;
+    }
+#else
+    if (ghFioOspHandle == NULL || ghFioOspHandle2 == NULL)
+    {
+        OspBridgeSetError("FIO OSP handle was not opened");
+        return -3;
+    }
+#endif
+
+    /* ★ OspBridge_Init() 도 동일하게 CreateThreads() 필요 */
+    CreateThreads();
+
+    goAppData.eAppMode = APP_MODE_RUN;
+    gbOspBridgeInitialized = true;
+    OspBridgeSetError("OK");
+    return 0;
+}
+
+OSP_BRIDGE_API int OSP_BRIDGE_CALL OspBridge_SetColorRgb(uint8_t nRed, uint8_t nGreen, uint8_t nBlue)
+{
+    /* 기본 동작: FIO0 (IF6/IF7, FID 0x02) 채널로 전송 */
+    return OspBridge_SetColorRgbByFid_Impl(0x02U, nRed, nGreen, nBlue);
+}
+
+/* =========================================================================
+ * OspBridge_SetColorRgbByFid  (DLL export — C# DllImport EntryPoint 일치)
+ * OspBridge_SetColorRgbByFid_Impl (내부 구현 — forward declaration 해소)
+ *
+ * FID 매핑:
+ *   0x03 → IF4/IF5 (FIO1, SAIF4/SAIF5) — ghFioOspHandle2
+ *   0x04 → IF6/IF7 (FIO0, SAIF6/SAIF7) — ghFioOspHandle  (기본값)
+ * ========================================================================= */
+static int OspBridge_SetColorRgbByFid_Impl(uint8_t nFid, uint8_t nRed, uint8_t nGreen, uint8_t nBlue)
+{
+    ADI_EAL_FIO_OSP_HANDLE hHandle;
+
+    if (!gbOspBridgeInitialized)
+    {
+        OspBridgeSetError("OspBridge_Init was not called or failed");
+        return -1;
+    }
+
+    /* FID=0x00 → multicast 핸들로 1회 broadcast (모든 연결 AD3304 동시) */
+    if (nFid == 0x00U)
+    {
+        if (ghFioMcastHandle == NULL)
+        {
+            OspBridgeSetError("FID=0x00 multicast handle not ready"); return -1;
+        }
+        goPwmData.nRedPwm       = (uint16_t)((((uint32_t)nRed)   * 0x7FFFU + 127U) / 255U);
+        goPwmData.bRedDayMode   = true;
+        goPwmData.nGreenPwm     = (uint16_t)((((uint32_t)nGreen) * 0x7FFFU + 127U) / 255U);
+        goPwmData.bGreenDayMode = true;
+        goPwmData.nBluePwm      = (uint16_t)((((uint32_t)nBlue)  * 0x7FFFU + 127U) / 255U);
+        goPwmData.bBlueDayMode  = true;
+        ADI_EAL_STATUS eMcSt = adi_fioOspSetPwm(ghFioMcastHandle, (uint16_t)BROADCAST_DEV_ADDR, &goPwmData, 0xFFU);
+        if (eMcSt != ADI_EAL_STATUS_SUCCESS)
+        { OspBridgeSetError("FID=0x00 multicast SetPwm failed"); return (int)eMcSt; }
+        OspBridgeSetError("OK"); return 0;
+    }
+
+#if OSP_FIO1_ONLY_TEST
+    /* FID 유효 범위: 0x01~0x08, 배열 인덱스 = FID-1 */
+    if (nFid < 0x01U || nFid > 0x08U ||
+        !gbAd3304Connected[nFid - 1U] ||
+        gahFidFioOspHandle[nFid - 1U] == NULL)
+    {
+        char szE[48]; (void)snprintf(szE, sizeof(szE), "FID=0x%02X not connected", (unsigned)nFid);
+        OspBridgeSetError(szE); return -1;
+    }
+    hHandle = gahFidFioOspHandle[nFid - 1U];
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[OSP AD3304 FID=0x%02X] RGB=(%d,%d,%d) remote=%u node=%u handle=%p\r\n",
+        (unsigned)nFid, (int)nRed, (int)nGreen, (int)nBlue,
+        (unsigned)(nFid - 1U), (unsigned)gnFidNodeAddr[nFid - 1U], (void*)hHandle);
+#else
+    /* FID에 따라 채널(FIO 핸들) 선택
+     *   0x01 → IF4/IF5 (FIO1, ghFioOspHandle2)
+     *   0x02 → IF6/IF7 (FIO0, ghFioOspHandle)
+     */
+    if (nFid == 0x01U)
+    {
+        /* IF4/IF5 채널 (FIO1) */
+        if (ghFioOspHandle2 == NULL)
+        {
+            OspBridgeSetError("FIO1 handle not open (IF4/IF5)");
+            return -1;
+        }
+        hHandle = ghFioOspHandle2;
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] SetColorRgb FID=0x01 -> FIO1 handle=%p RGB=(%d,%d,%d)\r\n",
+            (void*)hHandle, (int)nRed, (int)nGreen, (int)nBlue);
+    }
+    else if (nFid == 0x02U)
+    {
+        /* IF6/IF7 채널 (FIO0) */
+        if (ghFioOspHandle == NULL)
+        {
+            OspBridgeSetError("FIO0 handle not open (IF6/IF7)");
+            return -1;
+        }
+        hHandle = ghFioOspHandle;
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] SetColorRgb FID=0x02 -> FIO0 handle=%p RGB=(%d,%d,%d)\r\n",
+            (void*)hHandle, (int)nRed, (int)nGreen, (int)nBlue);
+    }
+    else
+    {
+        OspBridgeSetError("Unsupported FID (supported: 0x01=IF4/IF5, 0x02=IF6/IF7)");
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] SetColorRgb FID=0x%02X -> unsupported FID\r\n", (unsigned)nFid);
+        return -1;
+    }
+#endif
+
+    goPwmData.nRedPwm = (uint16_t)((((uint32_t)nRed) * 0x7FFFU + 127U) / 255U);
+    goPwmData.bRedDayMode = true;
+    goPwmData.nGreenPwm = (uint16_t)((((uint32_t)nGreen) * 0x7FFFU + 127U) / 255U);
+    goPwmData.bGreenDayMode = true;
+    goPwmData.nBluePwm = (uint16_t)((((uint32_t)nBlue) * 0x7FFFU + 127U) / 255U);
+    goPwmData.bBlueDayMode = true;
+
+    /* FID 1~8 → 배열 인덱스 0~7 */
+    uint32_t nFidIdx = (nFid >= 1U && nFid <= 8U) ? (uint32_t)(nFid - 1U) : 8U;
+    uint16_t nTarget = (nFidIdx < 8U && gnFidNodeAddr[nFidIdx] != 0U)
+                       ? gnFidNodeAddr[nFidIdx] : (uint16_t)BROADCAST_DEV_ADDR;
+    ADI_EAL_STATUS eEalStatus = adi_fioOspSetPwm(hHandle, nTarget, &goPwmData, 0xFFU);
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "[DIAG] SetPwm FID=0x%02X status=%d (R_pwm=%d G_pwm=%d B_pwm=%d)\r\n",
+        (unsigned)nFid, eEalStatus,
+        (int)goPwmData.nRedPwm, (int)goPwmData.nGreenPwm, (int)goPwmData.nBluePwm);
+    if (eEalStatus != ADI_EAL_STATUS_SUCCESS)
+    {
+        OspBridgeSetError("adi_fioOspSetPwm failed");
+        return (int)eEalStatus;
+    }
+
+    OspBridgeSetError("OK");
+    return 0;
+}
+
+/* DLL export 래퍼 — C# DllImport EntryPoint "OspBridge_SetColorRgbByFid" 와 일치 */
+OSP_BRIDGE_API int OSP_BRIDGE_CALL OspBridge_SetColorRgbByFid(uint8_t nFid, uint8_t nRed, uint8_t nGreen, uint8_t nBlue)
+{
+    return OspBridge_SetColorRgbByFid_Impl(nFid, nRed, nGreen, nBlue);
+}
+
+/* =========================================================================
+ * OspBridge_SetColorRgbByNode_Impl / OspBridge_SetColorRgbByNode
+ *
+ * SlaveFlag 기반 단일 LED(노드) unicast 제어.
+ * OSP 프로토콜에서 unicast 주소(0x001~0x3EF)로 체인 내 특정 노드만 지정.
+ *
+ * 파라미터:
+ *   nFid      — 채널 선택 (0x03=IF4/IF5, 0x04=IF6/IF7)
+ *   nNodeAddr — OSP 노드 주소 (1-based: 1=첫 번째 LED, 2=두 번째 LED, ...)
+ *               0 을 전달하면 broadcast (모든 노드에 동일 색상 전송)
+ *   nRed/nGreen/nBlue — 8비트 색상값 (0~255)
+ *
+ * 반환: 0=성공, 음수=오류
+ * ========================================================================= */
+static int OspBridge_SetColorRgbByNode_Impl(uint8_t nFid, uint16_t nNodeAddr,
+    uint8_t nRed, uint8_t nGreen, uint8_t nBlue)
+{
+    return OspBridge_SetColorRgbByNodeEx_Impl(nFid, nNodeAddr, nRed, nGreen, nBlue, true);
+}
+
+static int OspBridge_SetColorRgbByNodeEx_Impl(uint8_t nFid, uint16_t nNodeAddr,
+    uint8_t nRed, uint8_t nGreen, uint8_t nBlue, bool bFlush)
+{
+    ADI_EAL_FIO_OSP_HANDLE hHandle = NULL;
+
+    if (!gbOspBridgeInitialized)
+    {
+        OspBridgeSetError("OspBridge_Init was not called or failed");
+        return -1;
+    }
+
+#if OSP_FIO1_ONLY_TEST
+    if (nFid == 0x00U)
+    {
+        if (ghFioMcastHandle == NULL)
+        {
+            OspBridgeSetError("FID=0x00 multicast handle not ready");
+            return -1;
+        }
+        hHandle = ghFioMcastHandle;
+    }
+    else if (nFid < 0x01U || nFid > 0x08U ||
+        !gbAd3304Connected[nFid - 1U] ||
+        gahFidFioOspHandle[nFid - 1U] == NULL)
+    {
+        char szE[48]; (void)snprintf(szE, sizeof(szE), "FID=0x%02X not connected", (unsigned)nFid);
+        OspBridgeSetError(szE);
+        return -1;
+    }
+    else
+    {
+        hHandle = gahFidFioOspHandle[nFid - 1U];
+    }
+#else
+    /* FID에 따라 채널(FIO 핸들) 선택
+     *   0x01 → IF4/IF5 (FIO1, ghFioOspHandle2)
+     *   0x02 → IF6/IF7 (FIO0, ghFioOspHandle)
+     */
+    if (nFid == 0x01U)
+    {
+        if (ghFioOspHandle2 == NULL)
+        {
+            OspBridgeSetError("FIO1 handle not open (IF4/IF5)");
+            return -1;
+        }
+        hHandle = ghFioOspHandle2;
+    }
+    else if (nFid == 0x02U)
+    {
+        if (ghFioOspHandle == NULL)
+        {
+            OspBridgeSetError("FIO0 handle not open (IF6/IF7)");
+            return -1;
+        }
+        hHandle = ghFioOspHandle;
+    }
+    else
+    {
+        OspBridgeSetError("Unsupported FID (supported: 0x01=IF4/IF5, 0x02=IF6/IF7)");
+        return -1;
+    }
+#endif
+
+    /* nNodeAddr == 0 이면 broadcast, 그 외에는 unicast */
+    uint16_t nTarget = (nNodeAddr == 0U) ? (uint16_t)BROADCAST_DEV_ADDR : nNodeAddr;
+
+    ADI_FIO_OSP_PWM_DATA oPwmData;
+    oPwmData.nRedPwm = (uint16_t)((((uint32_t)nRed) * 0x7FFFU + 127U) / 255U);
+    oPwmData.bRedDayMode = true;
+    oPwmData.nGreenPwm = (uint16_t)((((uint32_t)nGreen) * 0x7FFFU + 127U) / 255U);
+    oPwmData.bGreenDayMode = true;
+    oPwmData.nBluePwm = (uint16_t)((((uint32_t)nBlue) * 0x7FFFU + 127U) / 255U);
+    oPwmData.bBlueDayMode = true;
+
+    ADI_PAL_LOG(ADI_CONSOLE_PROMPT,
+        "[DIAG] SetColorRgbByNode FID=0x%02X node=%u RGB=(%d,%d,%d)\\r\\n",
+        (unsigned)nFid, (unsigned)nTarget,
+        (int)nRed, (int)nGreen, (int)nBlue);
+
+    /* unicast SET_PWM: nId=0xFF → write-only (응답 없음, 빠른 전송) */
+    ADI_EAL_STATUS eEalStatus = adi_fioOspSetPwm(hHandle, nTarget, &oPwmData, 0xFFU);
+    if (eEalStatus != ADI_EAL_STATUS_SUCCESS)
+    {
+        OspBridgeSetError("adi_fioOspSetPwm (unicast) failed");
+        return (int)eEalStatus;
+    }
+
+    /* unicast TX 후 flush — 대기 없이 즉시 전송(0ULL).
+     * OspBridge 모드에서는 AppThread2(FioOspReadPwm) 자동 루프가 비활성화되므로
+     * READ_PWM 프레임이 큐에 섞이지 않는다.
+     * LED 1~수개 제어 시 큐 오버플로우 우려 없음. */
+    if (bFlush)
+    {
+        adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 0ULL);
+    }
+
+    OspBridgeSetError("OK");
+    return 0;
+}
+
+/* DLL export — C# DllImport EntryPoint "OspBridge_SetColorRgbByNode" */
+OSP_BRIDGE_API int OSP_BRIDGE_CALL OspBridge_SetColorRgbByNode(uint8_t nFid, uint16_t nNodeAddr,
+    uint8_t nRed, uint8_t nGreen, uint8_t nBlue)
+{
+    return OspBridge_SetColorRgbByNode_Impl(nFid, nNodeAddr, nRed, nGreen, nBlue);
+}
+
+OSP_BRIDGE_API int OSP_BRIDGE_CALL OspBridge_SetColorRgbByNodes(uint8_t nFid, const uint16_t* pnNodeAddrs,
+    const uint8_t* pnRed, const uint8_t* pnGreen, const uint8_t* pnBlue, uint16_t nCount)
+{
+    if (pnNodeAddrs == NULL || pnRed == NULL || pnGreen == NULL || pnBlue == NULL)
+    {
+        OspBridgeSetError("OspBridge_SetColorRgbByNodes null buffer");
+        return -1;
+    }
+    if (nCount == 0U)
+    {
+        OspBridgeSetError("OK");
+        return 0;
+    }
+
+    for (uint16_t i = 0U; i < nCount; i++)
+    {
+        int nStatus = OspBridge_SetColorRgbByNodeEx_Impl(nFid, pnNodeAddrs[i], pnRed[i], pnGreen[i], pnBlue[i], false);
+        if (nStatus != 0)
+        {
+            return nStatus;
+        }
+    }
+
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 0ULL);
+    OspBridgeSetError("OK");
+    return 0;
+}
+
+OSP_BRIDGE_API int OSP_BRIDGE_CALL OspBridge_Readback(uint16_t* pnRedPwm, uint16_t* pnGreenPwm, uint16_t* pnBluePwm,
+    double* pdTemperature)
+{
+    ADI_EAL_FIO_OSP_HANDLE hReadHandle =
+#if OSP_FIO1_ONLY_TEST
+        ghFioOspHandle2;
+#else
+        ghFioOspHandle;
+#endif
+
+    if (!gbOspBridgeInitialized || hReadHandle == NULL)
+    {
+        OspBridgeSetError("OspBridge_Init was not called or failed");
+        return -1;
+    }
+
+    if (pnRedPwm == NULL || pnGreenPwm == NULL || pnBluePwm == NULL || pdTemperature == NULL)
+    {
+        OspBridgeSetError("Invalid readback pointer");
+        return -2;
+    }
+
+    ADI_FIO_OSP_PWM_DATA oPwmData;
+    (void)ADI_MEMSET(&oPwmData, 0, sizeof(oPwmData));
+
+    /* ★ SetPwm 전송 완료 후 ReadPwm 요청 (큐 오버플로우 방지) */
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 20ULL * MS_TO_NS);
+
+    ADI_EAL_STATUS eEalStatus = adi_fioOspReadPwm(hReadHandle, gnOspBridgeDeviceAddress, &oPwmData, 0x4EU);
+    if (eEalStatus != ADI_EAL_STATUS_SUCCESS)
+    {
+        OspBridgeSetError("adi_fioOspReadPwm failed");
+        return (int)eEalStatus;
+    }
+
+    double dTemperature = 0.0;
+    eEalStatus = adi_fioOspReadTemp(hReadHandle, gnOspBridgeDeviceAddress, &dTemperature, 0x48U);
+    if (eEalStatus != ADI_EAL_STATUS_SUCCESS)
+    {
+        OspBridgeSetError("adi_fioOspReadTemp failed");
+        return (int)eEalStatus;
+    }
+
+    *pnRedPwm = oPwmData.nRedPwm;
+    *pnGreenPwm = oPwmData.nGreenPwm;
+    *pnBluePwm = oPwmData.nBluePwm;
+    *pdTemperature = dTemperature;
+
+    OspBridgeSetError("OK");
+    return 0;
+}
+
+OSP_BRIDGE_API int OSP_BRIDGE_CALL OspBridge_ReadbackByFid(uint8_t nFid, uint16_t nNodeAddr,
+    uint16_t* pnRedPwm, uint16_t* pnGreenPwm, uint16_t* pnBluePwm, double* pdTemperature)
+{
+    ADI_EAL_FIO_OSP_HANDLE hHandle;
+
+    if (!gbOspBridgeInitialized)
+    {
+        OspBridgeSetError("OspBridge_Init was not called or failed");
+        return -1;
+    }
+
+    if (pnRedPwm == NULL || pnGreenPwm == NULL || pnBluePwm == NULL || pdTemperature == NULL)
+    {
+        OspBridgeSetError("Invalid readback pointer");
+        return -2;
+    }
+
+#if OSP_FIO1_ONLY_TEST
+    if (nFid < 0x01U || nFid > 0x08U ||
+        !gbAd3304Connected[nFid - 1U] ||
+        gahFidFioOspHandle[nFid - 1U] == NULL)
+    {
+        char szE[48]; (void)snprintf(szE, sizeof(szE), "FID=0x%02X not connected", (unsigned)nFid);
+        OspBridgeSetError(szE);
+        return -3;
+    }
+    hHandle = gahFidFioOspHandle[nFid - 1U];
+#else
+    if (nFid == 0x01U)
+    {
+        if (ghFioOspHandle2 == NULL)
+        {
+            OspBridgeSetError("FIO1 handle not open (IF4/IF5)");
+            return -3;
+        }
+        hHandle = ghFioOspHandle2;
+    }
+    else if (nFid == 0x02U)
+    {
+        if (ghFioOspHandle == NULL)
+        {
+            OspBridgeSetError("FIO0 handle not open (IF6/IF7)");
+            return -4;
+        }
+        hHandle = ghFioOspHandle;
+    }
+    else
+    {
+        OspBridgeSetError("Unsupported FID (supported: 0x01=IF4/IF5, 0x02=IF6/IF7)");
+        return -5;
+    }
+#endif
+
+    uint16_t nTarget =
+#if OSP_FIO1_ONLY_TEST
+        (nNodeAddr == 0U) ? gnFidNodeAddr[nFid - 1U] : nNodeAddr;
+#else
+        (nNodeAddr == 0U) ? gnOspBridgeDeviceAddress : nNodeAddr;
+#endif
+    if (nTarget == 0U)
+    {
+        nTarget = 1U;
+    }
+
+    /* ★ SetPwm(broadcast) → ReadPwm(unicast) 사이의 큐 오버플로우 방지.
+     *   SetPwm 프레임이 아직 TX 큐에 남아있는 상태에서
+     *   ReadPwm 요청을 enqueue하면 큐가 꽉 차 error 12 가 발생한다.
+     *   flush로 SetPwm 전송을 완료시킨 뒤 ReadPwm을 넣어야 한다.
+     *   [수정] 12노드 unicast 연속 TX가 모두 완료될 충분한 시간으로 증가 (20→100ms) */
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 100ULL * MS_TO_NS);
+
+    ADI_FIO_OSP_PWM_DATA oPwmData;
+    (void)ADI_MEMSET(&oPwmData, 0, sizeof(oPwmData));
+
+    ADI_EAL_STATUS eEalStatus = adi_fioOspReadPwm(hHandle, nTarget, &oPwmData, 0x4EU);
+    if (eEalStatus != ADI_EAL_STATUS_SUCCESS)
+    {
+        OspBridgeSetError("adi_fioOspReadPwm failed");
+        return (int)eEalStatus;
+    }
+
+    double dTemperature = 0.0;
+    eEalStatus = adi_fioOspReadTemp(hHandle, nTarget, &dTemperature, 0x48U);
+    if (eEalStatus != ADI_EAL_STATUS_SUCCESS)
+    {
+        OspBridgeSetError("adi_fioOspReadTemp failed");
+        return (int)eEalStatus;
+    }
+
+    *pnRedPwm = oPwmData.nRedPwm;
+    *pnGreenPwm = oPwmData.nGreenPwm;
+    *pnBluePwm = oPwmData.nBluePwm;
+    *pdTemperature = dTemperature;
+
+    OspBridgeSetError("OK");
+    return 0;
+}
+
+OSP_BRIDGE_API void OSP_BRIDGE_CALL OspBridge_Close(void)
+{
+    if (!gbOspBridgeInitialized)
+    {
+        /* 이미 닫혀 있으면 중복 호출 무시 */
+        return;
+    }
+
+    /* 1. FIO OSP 핸들 먼저 닫기 (E2B 프레임 큐 비움) */
+    if (ghFioOspHandle != NULL)
+    {
+        (void)adi_eal_fioOspClose(ghFioOspHandle);
+        ghFioOspHandle = NULL;
+    }
+
+    /* multicast 핸들 먼저 Close (terminateInstance 전) */
+    if (ghFioMcastHandle != NULL)
+    {
+        (void)adi_eal_fioOspClose(ghFioMcastHandle);
+        ghFioMcastHandle = NULL;
+    }
+    for (uint32_t i = 0U; i < NUM_REMOTE_NODES; i++)
+    {
+        if (gahFidFioOspHandle[i] != NULL)
+        {
+            (void)adi_eal_fioOspClose(gahFidFioOspHandle[i]);
+            gahFidFioOspHandle[i] = NULL;
+        }
+    }
+    ghFioOspHandle2 = NULL;
+
+    /* 2. EAL 인스턴스 해제 */
+    adi_eal_terminateInstance(0U);
+
+    /* 3. network device 닫기 — openDevice() 의 짝.
+     *    adi_network_init() / adi_pal_init() 은 deinit 함수가 없으므로
+     *    재호출하지 않는다. (gbSystemInitialized 플래그로 보호)
+     *    closeDevice 만 호출해 SPI 핸들을 해제하면 다음 openDevice 가 정상 동작. */
+    adi_network_closeDevice(ADI_NETWORK_DEV_IDX);
+
+    /* 4. RTOS 스케줄러 종료 */
+    prj_osal_endScheduler();
+
+    /* 5. 재연결을 위해 전역 상태 초기화 */
+    (void)ADI_MEMSET(&goAppData, 0, sizeof(goAppData));
+    (void)ADI_MEMSET(&goMacPhyCfg, 0, sizeof(goMacPhyCfg));
+    (void)ADI_MEMSET(&goEalFioOspCfg, 0, sizeof(goEalFioOspCfg));
+    (void)ADI_MEMSET(&goEalDiagcfg, 0, sizeof(goEalDiagcfg));
+
+    /* 스택·TCB 메모리를 0으로 초기화해 재사용 시 garbage 방지 */
+    (void)ADI_MEMSET(ganInitThreadStack, 0, sizeof(ganInitThreadStack));
+    (void)ADI_MEMSET(ganAppThreadStack1, 0, sizeof(ganAppThreadStack1));
+    (void)ADI_MEMSET(ganAppThreadStack2, 0, sizeof(ganAppThreadStack2));
+    (void)ADI_MEMSET(ganHouseKeepingThreadStack, 0, sizeof(ganHouseKeepingThreadStack));
+    (void)ADI_MEMSET(ganInitThreadTcb, 0, sizeof(ganInitThreadTcb));
+    (void)ADI_MEMSET(ganAppThreadTcb1, 0, sizeof(ganAppThreadTcb1));
+    (void)ADI_MEMSET(ganAppThreadTcb2, 0, sizeof(ganAppThreadTcb2));
+    (void)ADI_MEMSET(ganHouseKeepingThreadTcb, 0, sizeof(ganHouseKeepingThreadTcb));
+
+    ghAppThread1 = NULL;
+    ghAppThread2 = NULL;
+    ghHouseKeepingThread = NULL;
+    gnOspBridgeDeviceAddress = INIT_DEV_ADDR;
+    gnPlcaNodeId = 1U;
+
+    gbOspBridgeInitialized = false;
+    gbFioOspDeviceInitialized = false;  /* ★ 재연결 시 FioOspDeviceInit 재실행 허용 */
+    (void)memset(gbAd3304Connected, 0, sizeof(gbAd3304Connected));
+    (void)memset(gnFidNodeAddr,     0, sizeof(gnFidNodeAddr));
+    FioOspResetFidDiag();
+    /* multicast 상태 초기화 (terminateInstance 이후 안전) */
+    ghFioMcastHandle = NULL;
+    for (uint32_t i = 0U; i < NUM_REMOTE_NODES; i++) { ganMcastHandles[i] = NULL; }
+    (void)ADI_MEMSET(&goMcastCfg, 0, sizeof(goMcastCfg));
+    (void)ADI_MEMSET(gnFioMcastMem, 0, sizeof(gnFioMcastMem));
+    /* gbOspBridgeMode, gbSystemInitialized 는 true 유지 —
+     * 재연결 시 adi_pal_init()/adi_network_init() 재호출 방지 */
+    OspBridgeSetError("Closed");
+}
+
+OSP_BRIDGE_API const char* OSP_BRIDGE_CALL OspBridge_GetLastError(void)
+{
+    return gsOspBridgeLastError;
+}
+
+OSP_BRIDGE_API const char* OSP_BRIDGE_CALL OspBridge_GetFioTrace(void)
+{
+    return gsFioTrace;
+}
+
+/* =========================================================================
+ * OspBridge_GetFioStatus
+ *
+ * FIO0 / FIO1 채널의 초기화 상태를 문자열로 반환합니다.
+ * C#에서 Init 직후 호출하여 FIO1 채널이 정상적으로 열렸는지 진단합니다.
+ *
+ * 반환 형식:
+ *   "FIO0=OK(0x1234ABCD) FIO1=OK(0x5678DCBA)"   → 둘 다 정상
+ *   "FIO0=OK(0x1234ABCD) FIO1=NULL"              → FIO1 핸들 없음
+ *   "FIO0=NULL FIO1=NULL"                         → 초기화 전
+ * ========================================================================= */
+OSP_BRIDGE_API const char* OSP_BRIDGE_CALL OspBridge_GetFioStatus(void)
+{
+    static char sBuf[512];
+    char* p = sBuf;
+
+    for (uint32_t i = 0U; i < NUM_REMOTE_NODES; i++)
+    {
+        int n = snprintf(p, (size_t)(sBuf + sizeof(sBuf) - p),
+                         "FID%02u=%s ",
+                         (unsigned)(i + 1U),
+                         (gahFidFioOspHandle[i] != NULL) ? "OK" : "NULL");
+        if (n > 0) { p += n; }
+    }
+    if (p > sBuf && *(p - 1) == '\n') { *(p - 1) = '\0'; }
+    return sBuf;
+}
+
+/* =========================================================================
+ * OspBridge_GetFioDiag
+ *
+ * FIO0 / FIO1 Init 전 단계의 status 코드를 문자열로 반환합니다.
+ * Init 직후 C#에서 호출하면 어느 단계에서 실패했는지 정확히 알 수 있습니다.
+ *
+ * 반환 예시 (모두 정상):
+ *   "F0:Open=0,CB=0,RAM=0,Rst=0,Bidir=0,Addr=1,Setup=0,State=0,Hdl=1|"
+ *   "F1:Open=0,CB=0,RAM=0,Rst=0,Bidir=0,Addr=1,Setup=0,State=0,Hdl=1"
+ *
+ * status=0 이면 성공, -99 이면 해당 단계 미실행, 그 외 값은 EAL 오류코드
+ * ========================================================================= */
+OSP_BRIDGE_API const char* OSP_BRIDGE_CALL OspBridge_GetFioDiag(void)
+{
+    static char sBuf[1536];
+    char* p = sBuf;
+    int n = snprintf(p, (size_t)(sBuf + sizeof(sBuf) - p),
+        "F0:Open=%d,CB=%d,RAM=%d,Rst=%d,Bidir=%d,Addr=%d,Setup=%d,State=%d,Hdl=%d|"
+        "F1:Open=%d,CB=%d,RAM=%d,Rst=%d,Bidir=%d,Addr=%d,Setup=%d,State=%d,Hdl=%d",
+        goFioDiag.nFio0Open, goFioDiag.nFio0Callback, goFioDiag.nFio0InstRAM,
+        goFioDiag.nFio0Reset, goFioDiag.nFio0InitBidir, goFioDiag.nFio0AssignedAddr,
+        goFioDiag.nFio0SetSetup, goFioDiag.nFio0SetState, goFioDiag.nFio0HandleValid,
+        goFioDiag.nFio1Open, goFioDiag.nFio1Callback, goFioDiag.nFio1InstRAM,
+        goFioDiag.nFio1Reset, goFioDiag.nFio1InitBidir, goFioDiag.nFio1AssignedAddr,
+        goFioDiag.nFio1SetSetup, goFioDiag.nFio1SetState, goFioDiag.nFio1HandleValid);
+    if (n > 0) { p += n; }
+
+    for (uint32_t i = 0U; i < NUM_REMOTE_NODES; i++)
+    {
+        n = snprintf(p, (size_t)(sBuf + sizeof(sBuf) - p),
+                     "|FID%02u:Open=%d,CB=%d,RAM=%d,Rst=%d,Bidir=%d,Addr=%d,Setup=%d,State=%d,Hdl=%d",
+                     (unsigned)(i + 1U),
+                     gaFidFioDiag[i].nOpen, gaFidFioDiag[i].nCallback,
+                     gaFidFioDiag[i].nInstRAM, gaFidFioDiag[i].nReset,
+                     gaFidFioDiag[i].nInitBidir, gaFidFioDiag[i].nAssignedAddr,
+                     gaFidFioDiag[i].nSetSetup, gaFidFioDiag[i].nSetState,
+                     gaFidFioDiag[i].nHandleValid);
+        if (n > 0) { p += n; }
+    }
+    return sBuf;
+}
+
+OSP_BRIDGE_API const char* OSP_BRIDGE_CALL OspBridge_GetFioDiagAll(void)
+{
+    return OspBridge_GetFioDiag();
+}
+
+/* =========================================================================
+ * OspBridge_GetMacNode
+ *
+ * discovery 완료 후 ganRemoteMacAddrMap 에 저장된 실제 MAC 주소와
+ * gnPlcaNodeId 에 저장된 PLCA Node ID 를 반환합니다.
+ *
+ * @param pMac6   [out] 6바이트 버퍼 (MSB first: pMac6[0]=최상위)
+ * @param pNodeId [out] PLCA Node ID (0~254)
+ * @return 0=성공, 음수=오류
+ * ========================================================================= */
+OSP_BRIDGE_API int OSP_BRIDGE_CALL OspBridge_GetMacNode(uint8_t* pMac6, uint8_t* pNodeId)
+{
+    if (!gbOspBridgeInitialized)
+    {
+        OspBridgeSetError("OspBridge_Init was not called or failed");
+        return -1;
+    }
+    if (pMac6 == NULL || pNodeId == NULL)
+    {
+        OspBridgeSetError("Invalid pointer");
+        return -2;
+    }
+
+    /* 연결된 첫 번째 FID의 MAC 반환 (없으면 discovery 수신 MAC) */
+    {
+        bool bFound = false;
+        for (uint32_t nIdx = 0U; nIdx < 8U; nIdx++)
+        {
+            if (gbAd3304Connected[nIdx])
+            {
+                uint8_t anFidMac[6u];
+                app_utils_mac64To8(anFidMac, REMOTE_MAC_BASE + (uint64_t)(nIdx + 1U));
+                /* discovery 콜백에서 갱신된 실제 MAC 사용 */
+                (void)memcpy(pMac6, &ganRemoteMacAddrMap[nIdx][0u], 6u);
+                *pNodeId = ganRemoteMacAddrMap[nIdx][5u];
+                bFound = true;
+                break;
+            }
+        }
+        if (!bFound)
+        {
+            (void)memcpy(pMac6, &ganRemoteMacAddrMap[APP_REMOTE_1][0u], 6u);
+            *pNodeId = gnPlcaNodeId;
+        }
+    }
+
+    OspBridgeSetError("OK");
+    return 0;
+}
+
+/* =========================================================================
+ * OspBridge_SetMac
+ *
+ * AD3301 MAC 을 통신으로 변경하고 E2B/OSP 를 새 MAC 기준으로 재초기화합니다.
+ *   1) adi_eal_writeMacAddr() — AD3301 LCE + AD3306 EAL 라우팅
+ *   2) regmap / E2B cfg 갱신 (Eth10BaseT1sCfg_SetRemoteMac)
+ *   3) E2B + FIO-OSP 재 Init (스위치 샘플링 없음)
+ *
+ * 전원 재인가 후에는 OspBridge_InitFixed() 가 스위치 MAC 으로 다시 시작합니다.
+ *
+ * @param pMac6 [in] 6바이트 MAC, MSB first
+ * @return 0=성공, 음수=오류
+ * ========================================================================= */
+OSP_BRIDGE_API int OSP_BRIDGE_CALL OspBridge_SetMac(const uint8_t* pMac6)
+{
+    ADI_EAL_STATUS eEalStatus;
+    int nReinit;
+    uint8_t anReadMac[6u];
+
+    if (!gbOspBridgeInitialized)
+    {
+        OspBridgeSetError("OspBridge_Init was not called or failed");
+        return -1;
+    }
+    if (pMac6 == NULL)
+    {
+        OspBridgeSetError("Invalid pointer");
+        return -2;
+    }
+
+    /* 1. AD3301 + EAL: 현재 연결 MAC 으로 도달해 새 MAC 기록 (volatile) */
+    {
+        uint8_t anMacWr[6U];
+        (void)memcpy(anMacWr, pMac6, 6U);
+        eEalStatus = adi_eal_writeMacAddr(0U, APP_REMOTE_1, anMacWr);
+    }
+    if (eEalStatus != ADI_EAL_STATUS_SUCCESS)
+    {
+        OspBridgeSetError("adi_eal_writeMacAddr failed");
+        return (int)eEalStatus;
+    }
+    adi_network_flushTxTimed(50ULL * MS_TO_NS);
+
+    /* 2. 내부 맵 / regmap / E2B remote config 동기화 */
+    (void)memcpy(&ganRemoteMacAddrMap[APP_REMOTE_1][0u], pMac6, 6u);
+    Eth10BaseT1sCfg_SetRemoteMac(pMac6);
+
+    eEalStatus = adi_eal_setMacAddrSampling(0U, ADI_EAL_ALL_REMOTES, false);
+    if (eEalStatus != ADI_EAL_STATUS_SUCCESS)
+    {
+        OspBridgeSetError("adi_eal_setMacAddrSampling(false) failed");
+        return (int)eEalStatus;
+    }
+    adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 0ULL);
+
+    /* 3. E2B + OSP 재초기화 — 새 MAC 으로 discovery / configureNetwork / FIO init */
+    nReinit = OspBridge_ReinitE2bAndOsp();
+    if (nReinit != 0)
+    {
+        return nReinit;
+    }
+
+    (void)memcpy(anReadMac, &ganRemoteMacAddrMap[APP_REMOTE_1][0u], 6u);
+    if (memcmp(anReadMac, pMac6, 6U) != 0)
+    {
+        OspBridgeSetError("MAC mismatch after re-init");
+        return -4;
+    }
+
+    OspBridgeSetError("OK");
+    return 0;
+}
+
+/* =========================================================================
+ * OspBridge_SetNodeId
+ *
+ * AD3301 PLCA Node ID 를 변경합니다.
+ *   1) adi_eal_setRemotePlcaId() 로 EAL 에 반영
+ *   2) 성공 시 gnPlcaNodeId 갱신
+ *
+ * @param nNodeId [in] PLCA Node ID (1~254, 0=controller)
+ * @return 0=성공, 음수=오류
+ * ========================================================================= */
+OSP_BRIDGE_API int OSP_BRIDGE_CALL OspBridge_SetNodeId(uint8_t nNodeId)
+{
+    ADI_EAL_STATUS eStatus;
+    ADI_EAL_NODE_PLCA_ID_CFG oPlca;
+
+    if (!gbOspBridgeInitialized)
+    {
+        OspBridgeSetError("OspBridge_Init was not called or failed");
+        return -1;
+    }
+
+    oPlca.nMaskOfPlcaIdsUsed = 0x01U;
+    oPlca.anPlcaID[0U] = nNodeId;
+
+    eStatus = adi_eal_setRemotePlcaId(0U, &ganRemoteMacAddrMap[APP_REMOTE_1][0u], &oPlca, 0x0U);
+    if (eStatus != ADI_EAL_STATUS_SUCCESS)
+    {
+        OspBridgeSetError("adi_eal_setRemotePlcaId failed");
+        return (int)eStatus;
+    }
+
+    /* 성공 시 내부 추적 값 갱신 */
+    gnPlcaNodeId = nNodeId;
+
+    OspBridgeSetError("OK");
+    return 0;
+}
+
+/* =========================================================================
+ * OspBridge_ProgramMacNodeOtp
+ *
+ * Programs AD3301 OTP designer blocks for device MAC address and PLCA node ID.
+ * This is a one-time permanent operation. If the target designer OTP blocks are
+ * already programmed, adi_otp_generateOtpWriteData() returns an error and the
+ * programming step is not executed.
+ *
+ * @param pMac6   [in] Permanent device MAC, MSB first
+ * @param nNodeId [in] Permanent PLCA node ID
+ * @return 0=success, negative=bridge/local failure, positive=ADI_OTP_STATUS
+ * ========================================================================= */
+OSP_BRIDGE_API int OSP_BRIDGE_CALL OspBridge_ProgramMacNodeOtp(const uint8_t* pMac6, uint8_t nNodeId)
+{
+    ADI_OTP_HANDLE hOtp = NULL;
+    ADI_OTP_CONFIG oOtpCfg;
+    ADI_OTP_REMOTE_DATA oRemoteOtpData;
+    ADI_OTP_PGMTIME_REMOTE_CFG oPgmTimeCfg;
+    uint64_t anAccessMac[1U];
+    uint8_t anCurrentMac[6U];
+    uint8_t anMulticastMac[6U];
+    uint8_t nPgmTimePlcaId = 1U;
+    uint8_t anDesignerRaw[ADI_OTP_NUM_DESIGNER_SCRIPTS_BLOCKS * ADI_OTP_BLOCK_LEN_BYTES];
+    bool bDesignerRawValid = false;
+    char sOtpError[256] = "OK";
+    ADI_OTP_STATUS eOtpStatus;
+    int nReturn = 0;
+
+    if (!gbOspBridgeInitialized)
+    {
+        OspBridgeSetError("OspBridge_Init was not called or failed");
+        return -1;
+    }
+    if (pMac6 == NULL)
+    {
+        OspBridgeSetError("Invalid pointer");
+        return -2;
+    }
+    if (pMac6[5U] < 0x01U || pMac6[5U] > 0x08U)
+    {
+        OspBridgeSetError("OTP MAC last byte must be FID/Node 0x01..0x08");
+        return -3;
+    }
+    if (nNodeId != pMac6[5U])
+    {
+        OspBridgeSetError("OTP Node ID must match MAC last byte/FID");
+        return -4;
+    }
+
+    (void)ADI_MEMSET(&oOtpCfg, 0, sizeof(oOtpCfg));
+    (void)ADI_MEMSET(&oRemoteOtpData, 0, sizeof(oRemoteOtpData));
+    (void)ADI_MEMSET(&oPgmTimeCfg, 0, sizeof(oPgmTimeCfg));
+    (void)ADI_MEMSET(anCurrentMac, 0, sizeof(anCurrentMac));
+
+    (void)memcpy(anCurrentMac, &ganRemoteMacAddrMap[APP_REMOTE_1][0U], 6U);
+    if (OspBridge_Mac6To64(anCurrentMac) == 0ULL ||
+        anCurrentMac[5U] < 0x01U || anCurrentMac[5U] > 0x08U)
+    {
+        for (uint32_t nFidIdx = 0U; nFidIdx < NUM_REMOTE_NODES; nFidIdx++)
+        {
+            if (!gbAd3304Connected[nFidIdx])
+            {
+                continue;
+            }
+
+            uint8_t nFid = (uint8_t)(nFidIdx + 1U);
+            for (uint32_t nMapIdx = 0U; nMapIdx < NUM_REMOTE_NODES; nMapIdx++)
+            {
+                if (ganRemoteMacAddrMap[nMapIdx][5U] == nFid)
+                {
+                    (void)memcpy(anCurrentMac, &ganRemoteMacAddrMap[nMapIdx][0U], 6U);
+                    break;
+                }
+            }
+
+            if (anCurrentMac[5U] == nFid)
+            {
+                break;
+            }
+        }
+    }
+    anAccessMac[0U] = OspBridge_Mac6To64(anCurrentMac);
+    if (anAccessMac[0U] == 0ULL)
+    {
+        anAccessMac[0U] = REMOTE1_MAC_ADDR;
+        OspBridge_Mac64To6(anAccessMac[0U], anCurrentMac);
+    }
+    if (anCurrentMac[5U] >= 0x01U && anCurrentMac[5U] <= 0x08U)
+    {
+        nPgmTimePlcaId = anCurrentMac[5U];
+    }
+
+    OspBridge_Mac64To6(REMOTE1_MULTIMAC_ADDR, anMulticastMac);
+
+    (void)memcpy(oRemoteOtpData.oOtpDesignerData.anDevMacAddr, pMac6, 6U);
+    (void)memcpy(oRemoteOtpData.oOtpDesignerData.anMulticastMacAddr, anMulticastMac, 6U);
+    oRemoteOtpData.oOtpDesignerData.nPlcaLocalId = nNodeId;
+    oRemoteOtpData.oOtpDesignerData.nPlcaNodeCount = MAX_PLCA_NODE_CNT;
+    oRemoteOtpData.oOtpDesignerData.bPlcaEnable = true;
+    oRemoteOtpData.oOtpDesignerData.bPlcaLutEn = false;
+    oRemoteOtpData.bDesignerBlockWrEn[0U] = true; /* Designer block 0: MAC */
+    oRemoteOtpData.bDesignerBlockWrEn[4U] = true; /* Designer block 4: PLCA */
+
+    oPgmTimeCfg.paRemoteMacAddr = anAccessMac;
+    OspBridge_Mac64To6(CONTROLLER1_MAC_ADDR, oPgmTimeCfg.anControllerMacAddr);
+    oPgmTimeCfg.nRemotePlcaId = nPgmTimePlcaId;
+    /*
+     * adi_otp_init() resets the remote LV die. For unprogrammed boards the
+     * currently reachable MAC/FID comes back from SA_IF sampling after reset,
+     * so keep sampling enabled during the OTP setup access phase.
+     */
+    oPgmTimeCfg.bSampleMacAddr = true;
+
+    oOtpCfg.bPgmOverOaspi = false;
+    oOtpCfg.nNumNodes = 1U;
+    oOtpCfg.paoRemoteOtpData = &oRemoteOtpData;
+    oOtpCfg.poPgmTimeCfg = &oPgmTimeCfg;
+
+    OspBridge_CloseFioHandlesOnly();
+    adi_eal_terminateInstance(0U);
+
+    adi_otp_init(&hOtp, &oOtpCfg, ADI_NETWORK_DEV_IDX, false);
+    if (hOtp == NULL)
+    {
+        (void)snprintf(sOtpError, sizeof(sOtpError),
+            "adi_otp_init failed; accessMAC=%02X:%02X:%02X:%02X:%02X:%02X targetMAC=%02X:%02X:%02X:%02X:%02X:%02X node=%u",
+            anCurrentMac[0U], anCurrentMac[1U], anCurrentMac[2U], anCurrentMac[3U], anCurrentMac[4U], anCurrentMac[5U],
+            pMac6[0U], pMac6[1U], pMac6[2U], pMac6[3U], pMac6[4U], pMac6[5U], (unsigned)nNodeId);
+        OspBridgeSetError(sOtpError);
+        nReturn = -5;
+        goto restore_osp;
+    }
+    (void)adi_network_setPlca(ADI_NETWORK_DEV_IDX, true, MAX_PLCA_NODE_CNT, CTRL_PLCA_ID);
+    (void)adi_network_flushTxBuffer(ADI_NETWORK_DEV_IDX, 100ULL * MS_TO_NS);
+
+    eOtpStatus = adi_otp_setupRemoteNode(hOtp, 0U);
+    if (eOtpStatus != ADI_OTP_STATUS_NO_ERR)
+    {
+        (void)snprintf(sOtpError, sizeof(sOtpError),
+            "adi_otp_setupRemoteNode failed: status=%d (PGM_FAIL=PLCA/ping/MAC-write/network-config), accessMAC=%02X:%02X:%02X:%02X:%02X:%02X targetMAC=%02X:%02X:%02X:%02X:%02X:%02X pgmPLCA=%u otpNode=%u sampleSAIF=1",
+            (int)eOtpStatus,
+            anCurrentMac[0U], anCurrentMac[1U], anCurrentMac[2U], anCurrentMac[3U], anCurrentMac[4U], anCurrentMac[5U],
+            pMac6[0U], pMac6[1U], pMac6[2U], pMac6[3U], pMac6[4U], pMac6[5U],
+            (unsigned)nPgmTimePlcaId, (unsigned)nNodeId);
+        OspBridgeSetError(sOtpError);
+        nReturn = (int)eOtpStatus;
+        goto terminate_otp;
+    }
+
+    eOtpStatus = adi_otp_readBlockStatus(hOtp, 0U);
+    if (eOtpStatus != ADI_OTP_STATUS_NO_ERR)
+    {
+        (void)snprintf(sOtpError, sizeof(sOtpError),
+            "adi_otp_readBlockStatus failed: status=%d", (int)eOtpStatus);
+        OspBridgeSetError(sOtpError);
+        nReturn = (int)eOtpStatus;
+        goto terminate_otp;
+    }
+    eOtpStatus = adi_otp_readOtpContents(hOtp, 0U, ADI_OTP_NUM_HV_DATA_BLOCKS,
+        ADI_OTP_NUM_DESIGNER_SCRIPTS_BLOCKS, anDesignerRaw);
+    bDesignerRawValid = (eOtpStatus == ADI_OTP_STATUS_NO_ERR);
+
+    eOtpStatus = adi_otp_generateOtpWriteData(hOtp, 0U);
+    if (eOtpStatus != ADI_OTP_STATUS_NO_ERR)
+    {
+        const uint8_t* pMacBlock = &anDesignerRaw[0U * ADI_OTP_BLOCK_LEN_BYTES];
+        const uint8_t* pPlcaBlock = &anDesignerRaw[4U * ADI_OTP_BLOCK_LEN_BYTES];
+        if (bDesignerRawValid)
+        {
+            (void)snprintf(sOtpError, sizeof(sOtpError),
+                "adi_otp_generateOtpWriteData failed: status=%d; designer block already used. B3(MAC)=%u rawMAC=%02X:%02X:%02X:%02X:%02X:%02X B7(PLCA)=%u rawNode=%u. Only status 0 is writable",
+                (int)eOtpStatus,
+                (unsigned)oRemoteOtpData.aeBlockBootStatus[ADI_OTP_NUM_HV_DATA_BLOCKS + 0U],
+                pMacBlock[10U], pMacBlock[9U], pMacBlock[4U], pMacBlock[3U], pMacBlock[2U], pMacBlock[1U],
+                (unsigned)oRemoteOtpData.aeBlockBootStatus[ADI_OTP_NUM_HV_DATA_BLOCKS + 4U],
+                (unsigned)pPlcaBlock[1U]);
+        }
+        else
+        {
+            (void)snprintf(sOtpError, sizeof(sOtpError),
+                "adi_otp_generateOtpWriteData failed: status=%d; designer block already used. B3(MAC)=%u B7(PLCA)=%u. Only status 0 is writable",
+                (int)eOtpStatus,
+                (unsigned)oRemoteOtpData.aeBlockBootStatus[ADI_OTP_NUM_HV_DATA_BLOCKS + 0U],
+                (unsigned)oRemoteOtpData.aeBlockBootStatus[ADI_OTP_NUM_HV_DATA_BLOCKS + 4U]);
+        }
+        OspBridgeSetError(sOtpError);
+        nReturn = (int)eOtpStatus;
+        goto terminate_otp;
+    }
+
+    eOtpStatus = adi_otp_programOtp(hOtp, 0U);
+    if (eOtpStatus != ADI_OTP_STATUS_NO_ERR)
+    {
+        (void)snprintf(sOtpError, sizeof(sOtpError),
+            "adi_otp_programOtp failed: status=%d", (int)eOtpStatus);
+        OspBridgeSetError(sOtpError);
+        nReturn = (int)eOtpStatus;
+        goto terminate_otp;
+    }
+
+    eOtpStatus = adi_otp_readVerifyOtp(hOtp, 0U);
+    if (eOtpStatus != ADI_OTP_STATUS_NO_ERR)
+    {
+        (void)snprintf(sOtpError, sizeof(sOtpError),
+            "adi_otp_readVerifyOtp failed: status=%d", (int)eOtpStatus);
+        OspBridgeSetError(sOtpError);
+        nReturn = (int)eOtpStatus;
+        goto terminate_otp;
+    }
+
+    eOtpStatus = adi_otp_verifyBootStatus(hOtp, 0U);
+    if (eOtpStatus != ADI_OTP_STATUS_NO_ERR)
+    {
+        (void)snprintf(sOtpError, sizeof(sOtpError),
+            "adi_otp_verifyBootStatus failed: status=%d", (int)eOtpStatus);
+        OspBridgeSetError(sOtpError);
+        nReturn = (int)eOtpStatus;
+        goto terminate_otp;
+    }
+
+    (void)memcpy(&ganRemoteMacAddrMap[APP_REMOTE_1][0U], pMac6, 6U);
+    Eth10BaseT1sCfg_SetRemoteMac(pMac6);
+    gnPlcaNodeId = nNodeId;
+    OspBridgeSetError("OK");
+
+terminate_otp:
+    if (hOtp != NULL)
+    {
+        adi_otp_terminate(hOtp);
+        hOtp = NULL;
+    }
+
+restore_osp:
+    if (nReturn == 0)
+    {
+        (void)memcpy(&ganRemoteMacAddrMap[APP_REMOTE_1][0U], pMac6, 6U);
+        Eth10BaseT1sCfg_SetRemoteMac(pMac6);
+        gnPlcaNodeId = nNodeId;
+    }
+    else
+    {
+        (void)memcpy(&ganRemoteMacAddrMap[APP_REMOTE_1][0U], anCurrentMac, 6U);
+        Eth10BaseT1sCfg_SetRemoteMac(anCurrentMac);
+    }
+    goAppData.nMacCnt = 0U;
+    CreateE2bAppProgrammed();
+    FioOspDeviceInit();
+    if (nReturn != 0)
+    {
+        OspBridgeSetError(sOtpError);
+    }
+
+    return nReturn;
+}
+
+/** EAL Diagnostic callback */
+ADI_MEM_CODE_CRIT
+static void EalDiagCallback(uint32_t nInstNum, uint32_t nRemoteNum, ADI_EAL_DIAG_CBK_EVT eDiagCbkEvent,
+    const void* pArg)
+{
+    switch (eDiagCbkEvent)
+    {
+    case ADI_EAL_DIAG_CBK_EVT_MAC_STATUS:
+    {
+        /* Stats data */
+        ADI_EAL_DIAG_CBK_EVT_MAC_STATUS_DATA* poStatusDat = (ADI_EAL_DIAG_CBK_EVT_MAC_STATUS_DATA*)pArg;
+        app_utils_logRemoteMacStatus(poStatusDat, nRemoteNum);
+        break;
+    }
+
+    case ADI_EAL_DIAG_CBK_EVT_PHY_STATUS:
+    {
+        ADI_EAL_DIAG_CBK_EVT_PHY_STATUS_DATA* poStatusDat = (ADI_EAL_DIAG_CBK_EVT_PHY_STATUS_DATA*)pArg;
+        app_utils_logRemotePhyStatus(poStatusDat, nRemoteNum);
+        break;
+    }
+
+    case ADI_EAL_DIAG_CBK_EVT_PLCA_STATUS:
+    {
+        ADI_EAL_DIAG_CBK_EVT_PLCA_STATUS_DATA* poStatusDat = (ADI_EAL_DIAG_CBK_EVT_PLCA_STATUS_DATA*)pArg;
+        app_utils_logRemotePlcaStatus(poStatusDat, nRemoteNum);
+        break;
+    }
+
+    case ADI_EAL_DIAG_CBK_EVT_PTP_STATUS:
+    {
+        ADI_EAL_DIAG_CBK_EVT_PTP_STATUS_DATA* poStatusDat = (ADI_EAL_DIAG_CBK_EVT_PTP_STATUS_DATA*)pArg;
+        app_utils_logRemotePtpStatus(poStatusDat, nRemoteNum);
+        break;
+    }
+
+    case ADI_EAL_DIAG_CBK_EVT_PCS_STATUS:
+    {
+        ADI_EAL_DIAG_CBK_EVT_PCS_STATUS_DATA* poStatusDat = (ADI_EAL_DIAG_CBK_EVT_PCS_STATUS_DATA*)pArg;
+        app_utils_logRemotePcsStatus(poStatusDat, nRemoteNum);
+        break;
+    }
+
+    default:
+    {
+        break;
+    }
+    }
+}
+
+ADI_MEM_CODE_CRIT
+void adi_pal_appCbk(uint32_t nId, ADI_PAL_APP_EVT eEvent, const void* pData)
+{
+    switch (eEvent)
+    {
+    case ADI_PAL_EVT_FATAL_ERR:
+    {
+        if (gbOspBridgeMode)
+        {
+            gbOspBridgeInitialized = false;
+            OspBridgeSetError("ADI E2B/OSP stack reported a fatal initialization error");
+            break;
+        }
+
+        adi_pal_fatalError();
+        break;
+    }
+
+    case ADI_PAL_EVT_CLI_TX:
+    {
+        const ADI_PAL_EVT_CLI_TXDATA* poTxData = (const ADI_PAL_EVT_CLI_TXDATA*)pData;
+        app_utils_log(poTxData->pTxData, poTxData->nLength);
+        break;
+    }
+
+    case ADI_PAL_EVT_CLI_RX:
+    {
+        const uint8_t* pnRxByte = (const uint8_t*)pData;
+        app_utils_processRxByte(*pnRxByte);
+        break;
+    }
+
+    default:
+    {
+        break;
+    }
+    }
+}
+
+/**
+ * @brief Callback from the network layer
+ *
+ * @param nDevNum The device number for which this callback is for
+ * @param eEvent The type of event this callback is for
+ * @param pData The data corresponding to this event
+ */
+ADI_MEM_CODE_CRIT
+static void adi_network_cbk(uint32_t nDevNum, ADI_NETWORK_EVT eEvent, void* pData)
+{
+    switch (eEvent)
+    {
+    case ADI_NETWORK_EVT_ETH10_RX_RECEIVED:
+    {
+        ADI_NETWORK_EVT_ETH10_RX_RECEIVED_DATA* poRxDat = (ADI_NETWORK_EVT_ETH10_RX_RECEIVED_DATA*)pData;
+#ifdef SNIFFER_MODE_EN
+        /* Send all the received frames (from T1S) to the Ethernet in sniffer mode */
+        ADI_NETWORK_FRAME_CFG oNwFrameCfg;
+        (void)ADI_MEMSET(&oNwFrameCfg, 0, sizeof(ADI_NETWORK_FRAME_CFG));
+
+        // ~~~~~ Network frame configurations ~~~~~
+        oNwFrameCfg.bDuplicate = false;
+        oNwFrameCfg.bLenInclMacHdr = true;
+        oNwFrameCfg.eMacRoutingInfo = ADI_MACPHY_ROUTE_PORT0_LP;
+        oNwFrameCfg.eTsReg = ADI_TS_EGRESS_NONE;
+        oNwFrameCfg.nFrameType = ADI_E2BCORE_ETYPE;
+        oNwFrameCfg.nLenByte = poRxDat->nLength;
+        oNwFrameCfg.panPhysAddr = NULL;
+
+        uint8_t* pBuffer = NULL;
+
+        /* Get a buffer from network layer */
+        ADI_NETWORK_ERR eNwErr = adi_network_getTxBuffer(ADI_NETWORK_ETH_IDX, &pBuffer, &oNwFrameCfg);
+
+        /* Check if buffer is available */
+        if (eNwErr == ADI_NETWORK_OK)
+        {
+            /* Copy the frame data */
+            ADI_MEMCPY(pBuffer, poRxDat->pRxData, poRxDat->nLength);
+
+            /* Transmit the Ethernet frame */
+            adi_network_transmit(ADI_NETWORK_ETH_IDX, &oNwFrameCfg);
+        }
+
+#endif
+        uint16_t nEthertype = (poRxDat->pRxData[13]) | (poRxDat->pRxData[12] << 8U);
+
+        // Process if it's E2B frame
+        if (nEthertype == ADI_E2BCORE_ETYPE)
+        {
+            adi_e2bcore_processFrame(0U, poRxDat->pRxData, poRxDat->nLength);
+        }
+
+        break;
+    }
+
+    case ADI_NETWORK_EVT_ETH_RX_RECEIVED:
+    {
+        /* Nothing to do */
+        break;
+    }
+
+    case ADI_NETWORK_EVT_TX_SUCCESS:
+    {
+        /* Nothing to do */
+        break;
+    }
+
+    case ADI_NETWORK_EVT_MAC_STATUS:
+    {
+        /* Stats data */
+        ADI_NETWORK_EVT_MAC_STATUS_DATA* poStatusDat = (ADI_NETWORK_EVT_MAC_STATUS_DATA*)pData;
+        app_utils_logCtrlMacStatus(poStatusDat);
+        break;
+    }
+
+    case ADI_NETWORK_EVT_PHY_STATUS:
+    {
+        ADI_NETWORK_EVT_PHY_STATUS_DATA* poStatusDat = (ADI_NETWORK_EVT_PHY_STATUS_DATA*)pData;
+        app_utils_logCtrlPhyStatus(poStatusDat);
+        break;
+    }
+
+    case ADI_NETWORK_EVT_PLCA_STATUS:
+    {
+        ADI_NETWORK_EVT_PLCA_STATUS_DATA* poStatusDat = (ADI_NETWORK_EVT_PLCA_STATUS_DATA*)pData;
+        app_utils_logCtrlPlcaStatus(poStatusDat);
+        break;
+    }
+
+    case ADI_NETWORK_EVT_PTP_STATUS:
+    {
+        ADI_NETWORK_EVT_PTP_STATUS_DATA* poStatusDat = (ADI_NETWORK_EVT_PTP_STATUS_DATA*)pData;
+        app_utils_logCtrlPtpStatus(poStatusDat);
+        break;
+    }
+
+    case ADI_NETWORK_EVT_PCS_STATUS:
+    {
+        ADI_NETWORK_EVT_PCS_STATUS_DATA* poStatusDat = (ADI_NETWORK_EVT_PCS_STATUS_DATA*)pData;
+        app_utils_logCtrlPcsStatus(poStatusDat);
+        break;
+    }
+
+    case ADI_NETWORK_EVT_ERR:
+    {
+        /* Error event in the network */
+        ADI_NETWORK_EVT_ERR_DATA* poNwErrDat = (ADI_NETWORK_EVT_ERR_DATA*)pData;
+        ADI_PAL_LOG(ADI_CONSOLE_PROMPT, "Network error: %d\r\n", poNwErrDat->eErrType);
+        ADI_DBG_ERROR();
+        break;
+    }
+
+    default:
+    {
+        /* nothing to do */
+        break;
+    }
+    }
+}
+
+/** RX command callback */
+ADI_MEM_CODE_CRIT
+void app_utils_rxCmdCbk(uint8_t* anRxData, uint32_t nLength)
+{
+    bool bCmdProcessed = app_utils_parseRxCommand(anRxData, nLength, &goAppData.eAppCmd, &goAppData.eAppMode);
+
+    if (!bCmdProcessed)
+    {
+        goAppData.eAppCmd = APP_CMD_INVALID;
+    }
+}
+
+/* =========================================================================
+ * OspBridge_GetAd3304Status
+ *
+ * discovery 완료 후 gbAd3304Connected[] 배열을 문자열로 반환합니다.
+ * C# 에서 Init 직후 호출하여 어느 FID 가 연결됐는지 진단합니다.
+ *
+ * 반환 형식 (FID 0x01 ~ 0x08):
+ *   "FID01:O FID02:X FID03:X FID04:O FID05:X FID06:X FID07:X FID08:X"
+ *   O = 연결됨, X = 미연결
+ * ========================================================================= */
+OSP_BRIDGE_API const char* OSP_BRIDGE_CALL OspBridge_GetAd3304Status(void)
+{
+    /* "FID01:O " × 8 = 최대 72자 + 여유 */
+    static char sBuf[768];
+    char* p = sBuf;
+    for (uint32_t i = 0U; i < 8U; i++)
+    {
+        uint8_t anMac[6U] = {0U, 0U, 0U, 0U, 0U, 0U};
+        const char* pDisc = gbAd3304Connected[i] ? "OK " : "NO ";
+        const char* pFio = ((gaFidFioDiag[i].nInitBidir == 0) &&
+                            (gaFidFioDiag[i].nSetSetup == 0) &&
+                            (gaFidFioDiag[i].nSetState == 0) &&
+                            (gahFidFioOspHandle[i] != NULL)) ? "ACTIVE" : "FAIL";
+
+        if (gbAd3304Connected[i])
+        {
+            /* Discovery callback stores each MAC in its FID slot (FID-1), not in
+             * a packed 0..nMacCnt-1 list. Search all slots so sparse FIDs such
+             * as 01/02/03/05 still report the correct MAC address. */
+            for (uint32_t nMapIdx = 0U; nMapIdx < NUM_REMOTE_NODES; nMapIdx++)
+            {
+                if (ganRemoteMacAddrMap[nMapIdx][5U] == (uint8_t)(i + 1U))
+                {
+                    (void)memcpy(anMac, &ganRemoteMacAddrMap[nMapIdx][0U], 6U);
+                    break;
+                }
+            }
+        }
+
+        int n = snprintf(p, (size_t)(sBuf + sizeof(sBuf) - p),
+                         "FID%02u: MAC=%02X:%02X:%02X:%02X:%02X:%02X  DISC=%s  FIO=%s\n",
+                         (unsigned)(i + 1U),
+                         anMac[0], anMac[1], anMac[2],
+                         anMac[3], anMac[4], anMac[5],
+                         pDisc, pFio);
+        if (n > 0) { p += n; }
+    }
+    /* 끝 공백 제거 */
+    if (p > sBuf && *(p - 1) == ' ') { *(p - 1) = '\0'; }
+    return sBuf;
+}
+
+/** @} */
+
+/*
+* EOF: https://www.analog.com/
+*/

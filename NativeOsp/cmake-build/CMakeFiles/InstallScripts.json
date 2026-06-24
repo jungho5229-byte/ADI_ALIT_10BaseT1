@@ -1,0 +1,13 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260622_OTP/NativeOsp/cmake-build/cmake_install.cmake",
+		"C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260622_OTP/NativeOsp/cmake-build/common/cmake_install.cmake",
+		"C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260622_OTP/NativeOsp/cmake-build/pal/cmake_install.cmake",
+		"C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260622_OTP/NativeOsp/cmake-build/pal/pal_win_x64/cmake_install.cmake",
+		"C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260622_OTP/NativeOsp/cmake-build/network/cmake_install.cmake",
+		"C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260622_OTP/NativeOsp/cmake-build/eal/cmake_install.cmake",
+		"C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260622_OTP/NativeOsp/cmake-build/osal/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
