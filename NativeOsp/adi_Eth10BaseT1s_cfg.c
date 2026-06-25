@@ -9,7 +9,7 @@ and its licensors.
  *                 Remote 0~7 = FID 0x01~0x08 (8개 AD3304)
  * @author       : Modified from original ADI Automotive Software team file
 ******************************************************************************/
-//Test - CPU SPI Connect - Init 진행
+//Test - CPU SPI Connect - Init 진행_1
 /* =========================================================================
    |                               INCLUDES                                |
    ========================================================================= */
