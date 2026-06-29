@@ -10,6 +10,7 @@ and its licensors.
  * @author       : Modified from original ADI Automotive Software team file
 ******************************************************************************/
 //Test - CPU SPI Connect - Init 진행_1
+//20260629 CPU SPI Packint Test
 /* =========================================================================
    |                               INCLUDES                                |
    ========================================================================= */
