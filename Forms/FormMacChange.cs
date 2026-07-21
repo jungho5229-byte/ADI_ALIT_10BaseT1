@@ -69,6 +69,7 @@ namespace LINMaster.Forms
         {
             bool connected = _ft.IsConnected;
             btnRead.Enabled      = connected;
+            btnReadOtp.Enabled   = connected;
             btnWriteMac.Enabled  = connected;
             btnWriteNode.Enabled = connected;
             btnWriteAll.Enabled  = connected;
@@ -134,6 +135,52 @@ namespace LINMaster.Forms
             finally
             {
                 btnRead.Enabled = true;
+            }
+        }
+
+        // =========================================================================
+        // READ OTP – OTP designer 블록에 구워진 값 읽기 (IF Pin 값 아님)
+        // =========================================================================
+        private void btnReadOtp_Click(object sender, EventArgs e)
+        {
+            if (!_ft.IsConnected)
+            {
+                SetStatus("FT4222 미연결", Color.OrangeRed);
+                return;
+            }
+
+            btnReadOtp.Enabled = false;
+            SetStatus("OTP 읽는 중...", Color.Yellow);
+            Cursor = Cursors.WaitCursor;
+
+            try
+            {
+                if (_ft.ReadMacNodeOtp(out ulong mac, out byte nodeId,
+                        out byte bootMac, out byte bootPlca, out byte[] raw))
+                {
+                    _currentMac  = mac;
+                    _currentNode = nodeId;
+
+                    string macStr = FormatMac(mac);
+                    lblCurrentMac.Text  = macStr + "  [OTP]";
+                    lblCurrentNode.Text = $"0x{nodeId:X2}  ({nodeId})  [OTP]";
+
+                    // 레이아웃 검증용 원본 덤프 (상태 로그에서 확인)
+                    SetStatus(
+                        $"OTP read  MAC={macStr}  Node={nodeId}  bootStatus(MAC/PLCA)={bootMac}/{bootPlca}",
+                        Color.LimeGreen);
+                }
+                else
+                {
+                    lblCurrentMac.Text  = "OTP 읽기 실패";
+                    lblCurrentNode.Text = "OTP 읽기 실패";
+                    SetStatus("OTP 읽기 실패: " + _ft.LastError, Color.OrangeRed);
+                }
+            }
+            finally
+            {
+                Cursor = Cursors.Default;
+                btnReadOtp.Enabled = _ft.IsConnected;
             }
         }
 

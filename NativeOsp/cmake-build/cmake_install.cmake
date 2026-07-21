@@ -1,4 +1,4 @@
-# Install script for directory: C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260622_OTP/NativeOsp
+# Install script for directory: C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260715_OSP_Ilas_OK/NativeOsp
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
@@ -39,33 +39,33 @@ endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for the subdirectory.
-  include("C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260622_OTP/NativeOsp/cmake-build/common/cmake_install.cmake")
+  include("C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260715_OSP_Ilas_OK/NativeOsp/cmake-build/common/cmake_install.cmake")
 endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for the subdirectory.
-  include("C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260622_OTP/NativeOsp/cmake-build/pal/cmake_install.cmake")
+  include("C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260715_OSP_Ilas_OK/NativeOsp/cmake-build/pal/cmake_install.cmake")
 endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for the subdirectory.
-  include("C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260622_OTP/NativeOsp/cmake-build/network/cmake_install.cmake")
+  include("C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260715_OSP_Ilas_OK/NativeOsp/cmake-build/network/cmake_install.cmake")
 endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for the subdirectory.
-  include("C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260622_OTP/NativeOsp/cmake-build/eal/cmake_install.cmake")
+  include("C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260715_OSP_Ilas_OK/NativeOsp/cmake-build/eal/cmake_install.cmake")
 endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for the subdirectory.
-  include("C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260622_OTP/NativeOsp/cmake-build/osal/cmake_install.cmake")
+  include("C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260715_OSP_Ilas_OK/NativeOsp/cmake-build/osal/cmake_install.cmake")
 endif()
 
 string(REPLACE ";" "\n" CMAKE_INSTALL_MANIFEST_CONTENT
        "${CMAKE_INSTALL_MANIFEST_FILES}")
 if(CMAKE_INSTALL_LOCAL_ONLY)
-  file(WRITE "C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260622_OTP/NativeOsp/cmake-build/install_local_manifest.txt"
+  file(WRITE "C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260715_OSP_Ilas_OK/NativeOsp/cmake-build/install_local_manifest.txt"
      "${CMAKE_INSTALL_MANIFEST_CONTENT}")
 endif()
 if(CMAKE_INSTALL_COMPONENT)
@@ -81,6 +81,6 @@ else()
 endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
-  file(WRITE "C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260622_OTP/NativeOsp/cmake-build/${CMAKE_INSTALL_MANIFEST}"
+  file(WRITE "C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260715_OSP_Ilas_OK/NativeOsp/cmake-build/${CMAKE_INSTALL_MANIFEST}"
      "${CMAKE_INSTALL_MANIFEST_CONTENT}")
 endif()

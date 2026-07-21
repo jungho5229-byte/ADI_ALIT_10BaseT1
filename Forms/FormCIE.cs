@@ -3,6 +3,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Linq;
 using System.Windows.Forms;
 using LINMaster.LIN;
 
@@ -79,7 +80,11 @@ namespace LINMaster.Forms
         //   FID 0x07 (MLMM6) → AD3304 FID 0x07              ★ 지원
         //   FID 0x08 (MLMM7) → AD3304 FID 0x08              ★ 지원
         // ──────────────────────────────────────────────────────────────────
-        private const int LED_COUNT = 25;   // ★ 포트당 LED 개수 (변경 가능)
+        private const int LED_COUNT = 25;   // FIO LED count kept at 25
+        private const int MAX_TRACKED_LED_COUNT = 255; // ISELED address is 1..255
+        private const int ILAS_BROADCAST_LED_COUNT = 84;
+        private static readonly bool OSP_VERBOSE_NODE_TX_LOG = false;
+        private static readonly bool CIE_SHIFT_VERBOSE_LOG = false;
 
         public event Action<string> OspMessage;
 
@@ -99,6 +104,7 @@ namespace LINMaster.Forms
         private bool _is1976 = false;                         // false=CIE1931(xy), true=CIE1976(u'v')
         private PointF _selXY = new PointF(0.3127f, 0.3290f); // 현재 선택된 CIE xy 좌표 (D65 기본값)
         private bool _hasSel = false;                         // 색상이 선택된 상태인지 여부
+        private bool _ospTxBusy = false;
         private Bitmap _cieBmp;                                  // CIE 색도도 캐시 비트맵
         private Size _cieCache;                                // 캐시된 비트맵의 크기 (크기 변경 감지용)
         private Rectangle _cr;                                      // CIE 렌더링 영역 (패널 내 좌표)
@@ -111,6 +117,8 @@ namespace LINMaster.Forms
 
         // ── CIE1931 스펙트럼 궤적 좌표 (380nm~700nm 파장별 xy) ─────────────
         // BuildCieBmp() 에서 색도도 외곽선을 그릴 때 사용
+        private enum OspLedPath { Combined, FioOnly, IlasOnly }
+
         private int _rgbwShiftOffset = 0;
         private const int LED_SHIFT_BASE_BRIGHTNESS = 0;
         private const int LED_SHIFT_WAVE_RADIUS = 3;
@@ -124,6 +132,12 @@ namespace LINMaster.Forms
         private readonly System.Collections.Generic.Dictionary<int, int> _ledShiftLastLevels
             = new System.Collections.Generic.Dictionary<int, int>();
         private string _ledShiftLastWaveKey = string.Empty;
+        private readonly System.Collections.Generic.Dictionary<int, int> _ledShiftFioLastLevels
+            = new System.Collections.Generic.Dictionary<int, int>();
+        private readonly System.Collections.Generic.Dictionary<int, int> _ledShiftIlasLastLevels
+            = new System.Collections.Generic.Dictionary<int, int>();
+        private string _ledShiftFioLastWaveKey = string.Empty;
+        private string _ledShiftIlasLastWaveKey = string.Empty;
 
         // ── LED_Shift_Up 상태 ─────────────────────────────────────────────
         // lo(아래)/hi(위) 방향을 각각 독립 추적. 각 끝 도달 시 locked 누적.
@@ -131,27 +145,53 @@ namespace LINMaster.Forms
         private int _ledShiftUpStepHi   = 0;
         private int _ledShiftUpLockedLo = 0;
         private int _ledShiftUpLockedHi = 0;
+        private int _ledShiftUpFioStepLo = 0, _ledShiftUpFioStepHi = 0;
+        private int _ledShiftUpIlasStepLo = 0, _ledShiftUpIlasStepHi = 0;
         private readonly System.Collections.Generic.List<int> _ledShiftUpPrevOn
             = new System.Collections.Generic.List<int>();
         private readonly System.Collections.Generic.Dictionary<int, int> _ledShiftUpLastLevels
             = new System.Collections.Generic.Dictionary<int, int>();
         private string _ledShiftUpLastWaveKey = string.Empty;
+        private readonly System.Collections.Generic.Dictionary<int, int> _ledShiftUpFioLastLevels
+            = new System.Collections.Generic.Dictionary<int, int>();
+        private readonly System.Collections.Generic.Dictionary<int, int> _ledShiftUpIlasLastLevels
+            = new System.Collections.Generic.Dictionary<int, int>();
+        private string _ledShiftUpFioLastWaveKey = string.Empty;
+        private string _ledShiftUpIlasLastWaveKey = string.Empty;
 
         // Shift Stack: LED25부터 LED1 방향으로 끝 LED를 한 개씩 누적한다.
         private int _shiftStackStep = 1;
         private int _shiftStackLocked = 0;
+        private int _shiftStackFioStep = 1, _shiftStackFioLocked = 0;
+        private int _shiftStackIlasStep = 1, _shiftStackIlasLocked = 0;
         private readonly System.Collections.Generic.Dictionary<int, int> _shiftStackLastLevels
             = new System.Collections.Generic.Dictionary<int, int>();
         private string _shiftStackLastWaveKey = string.Empty;
+        private readonly System.Collections.Generic.Dictionary<int, int> _shiftStackFioLastLevels
+            = new System.Collections.Generic.Dictionary<int, int>();
+        private readonly System.Collections.Generic.Dictionary<int, int> _shiftStackIlasLastLevels
+            = new System.Collections.Generic.Dictionary<int, int>();
+        private string _shiftStackFioLastWaveKey = string.Empty;
+        private string _shiftStackIlasLastWaveKey = string.Empty;
 
         // Shift Stack Up: 양쪽 끝에서 중앙 방향으로 각각 누적한다.
         private int _shiftStackUpStepLo = 0;
         private int _shiftStackUpStepHi = 0;
         private int _shiftStackUpLockedLo = 0;
         private int _shiftStackUpLockedHi = 0;
+        private int _shiftStackUpFioStepLo = 0, _shiftStackUpFioStepHi = 0;
+        private int _shiftStackUpFioLockedLo = 0, _shiftStackUpFioLockedHi = 0;
+        private int _shiftStackUpIlasStepLo = 0, _shiftStackUpIlasStepHi = 0;
+        private int _shiftStackUpIlasLockedLo = 0, _shiftStackUpIlasLockedHi = 0;
         private readonly System.Collections.Generic.Dictionary<int, int> _shiftStackUpLastLevels
             = new System.Collections.Generic.Dictionary<int, int>();
         private string _shiftStackUpLastWaveKey = string.Empty;
+        private readonly System.Collections.Generic.Dictionary<int, int> _shiftStackUpFioLastLevels
+            = new System.Collections.Generic.Dictionary<int, int>();
+        private readonly System.Collections.Generic.Dictionary<int, int> _shiftStackUpIlasLastLevels
+            = new System.Collections.Generic.Dictionary<int, int>();
+        private string _shiftStackUpFioLastWaveKey = string.Empty;
+        private string _shiftStackUpIlasLastWaveKey = string.Empty;
 
         // Move: 지정된 65개 CIE 좌표를 순서대로 전송하고 끝에서 처음으로 반복한다.
         /*
@@ -217,8 +257,8 @@ namespace LINMaster.Forms
         private System.Collections.Generic.List<int> _fadeActiveNodes;
         private LedRgb[] _fadeStartRgb;
         private LedRgb[] _fadeTargetRgb;
-        private readonly LedRgb[] _currentRgb = new LedRgb[LED_COUNT + 1];
-        private readonly bool[] _currentRgbKnown = new bool[LED_COUNT + 1];
+        private readonly LedRgb[] _currentRgb = new LedRgb[MAX_TRACKED_LED_COUNT + 1];
+        private readonly bool[] _currentRgbKnown = new bool[MAX_TRACKED_LED_COUNT + 1];
 
         private struct LedRgb
         {
@@ -283,6 +323,36 @@ namespace LINMaster.Forms
             RefreshPacketPreview();
         }
 
+        private bool IsOspTxEnabled()
+        {
+            return chkOspTxEnable == null || chkOspTxEnable.Checked;
+        }
+
+        private bool IsIlasTxEnabled()
+        {
+            return chkIlasTxEnable == null || chkIlasTxEnable.Checked;
+        }
+
+        private bool IsRxFeedbackEnabled()
+        {
+            return chkRxEnable != null && chkRxEnable.Checked;
+        }
+
+        private bool IsAnyShiftModeChecked()
+        {
+            return (chkRGBWShift != null && chkRGBWShift.Checked) ||
+                   (chkLedShift != null && chkLedShift.Checked) ||
+                   (chkShiftStack != null && chkShiftStack.Checked) ||
+                   (chkLedShiftUp != null && chkLedShiftUp.Checked) ||
+                   (chkShiftStackUp != null && chkShiftStackUp.Checked);
+        }
+
+        private void UpdateTxRxFeedbackMode()
+        {
+            if (_ft4222 != null)
+                _ft4222.TxRxFeedbackEnabled = IsRxFeedbackEnabled() && !IsAnyShiftModeChecked();
+        }
+
         private CheckBox[] GetSlaveFlagBoxes()
         {
             return new CheckBox[] {
@@ -311,6 +381,154 @@ namespace LINMaster.Forms
         }
 
 
+        private bool IsIlasTarget(byte fid)
+        {
+            return fid >= 0x01 && fid <= 0x08 &&
+                   _ft4222 != null && _ft4222.IsConnected &&
+                   _ft4222.IsIlasActiveFid(fid);
+        }
+
+        private bool IsFioTarget(byte fid)
+        {
+            return fid >= 0x01 && fid <= 0x08 &&
+                   _ft4222 != null && _ft4222.IsConnected &&
+                   _ft4222.IsFioActiveFid(fid);
+        }
+
+        private bool IsSplitFioIlasTarget(byte fid)
+        {
+            return fid >= 0x01 && fid <= 0x08 && IsFioTarget(fid) && IsIlasTarget(fid);
+        }
+
+        private int GetIlasLedCountForTarget(byte fid)
+        {
+            if (!IsIlasTarget(fid)) return 0;
+            int ilasCount = _ft4222.GetIlasLedCount();
+            if (ilasCount < 0) ilasCount = 0;
+            return Math.Min(MAX_TRACKED_LED_COUNT, ilasCount);
+        }
+
+        private System.Collections.Generic.List<int> GetIlasNodesForShiftTarget(byte fid)
+        {
+            int count = (fid == 0x00) ? GetBroadcastIlasLedCount() : GetIlasLedCountForTarget(fid);
+            return count > 0
+                ? BuildNodeRange(1, count)
+                : new System.Collections.Generic.List<int>();
+        }
+
+        private System.Collections.Generic.List<int> GetFioShiftUpNodes()
+        {
+            return BuildNodeRange(2, LED_COUNT);
+        }
+
+        private int GetTargetLedCount(byte fid)
+        {
+            bool hasFio = IsOspTxEnabled() && _ft4222 != null && _ft4222.IsConnected && _ft4222.IsFioActiveFid(fid);
+            bool hasIlas = IsIlasTxEnabled() && IsIlasTarget(fid);
+            int ilasCount = 0;
+
+            if (hasIlas)
+            {
+                ilasCount = _ft4222.GetIlasLedCount();
+                if (ilasCount < 0) ilasCount = 0;
+                ilasCount = Math.Min(MAX_TRACKED_LED_COUNT, ilasCount);
+            }
+
+            if (hasFio && hasIlas)
+                return Math.Max(LED_COUNT, ilasCount > 0 ? ilasCount : LED_COUNT);
+            if (hasIlas && ilasCount > 0)
+                return ilasCount;
+            return LED_COUNT;
+        }
+
+        private System.Collections.Generic.List<int> BuildNodeRange(int firstNode, int lastNode)
+        {
+            var nodes = new System.Collections.Generic.List<int>();
+            for (int node = firstNode; node <= lastNode; node++)
+                nodes.Add(node);
+            return nodes;
+        }
+
+        private System.Collections.Generic.List<int> GetFioActiveNodesFromSlaveFlags()
+        {
+            CheckBox[] allSF = GetSlaveFlagBoxes();
+            int sfCount = Math.Min(LED_COUNT, allSF.Length);
+            var activeNodes = new System.Collections.Generic.List<int>();
+            for (int i = 0; i < sfCount; i++)
+                if (allSF[i].Checked)
+                    activeNodes.Add(i + 1);
+            return activeNodes;
+        }
+
+        private System.Collections.Generic.List<int> GetActiveNodesForTarget(byte fid)
+        {
+            if (fid == 0x00 && IsIlasTxEnabled() && HasAnyIlasActiveTarget())
+                return BuildNodeRange(1, GetBroadcastIlasLedCount());
+            if (IsIlasTxEnabled() && IsIlasTarget(fid))
+                return BuildNodeRange(1, GetTargetLedCount(fid));
+
+            return GetFioActiveNodesFromSlaveFlags();
+        }
+
+        private System.Collections.Generic.List<int> GetShiftUpNodesForTarget(byte fid)
+        {
+            if (fid == 0x00 && IsIlasTxEnabled() && HasAnyIlasActiveTarget())
+                return BuildNodeRange(1, GetBroadcastIlasLedCount());
+            if (IsIlasTxEnabled() && IsIlasTarget(fid))
+                return BuildNodeRange(1, GetTargetLedCount(fid));
+
+            return BuildNodeRange(2, LED_COUNT);
+        }
+
+        private bool HasAnyIlasActiveTarget()
+        {
+            if (_ft4222 == null || !_ft4222.IsConnected) return false;
+            var fids = _ft4222.GetActiveFids();
+            foreach (byte fid in fids)
+                if (_ft4222.IsIlasActiveFid(fid))
+                    return true;
+            return false;
+        }
+
+        private int GetBroadcastIlasLedCount()
+        {
+            if (_ft4222 == null || !_ft4222.IsConnected) return LED_COUNT;
+            bool hasFio = false;
+            foreach (byte fid in _ft4222.GetActiveFids())
+            {
+                if (_ft4222.IsFioActiveFid(fid))
+                {
+                    hasFio = true;
+                    break;
+                }
+            }
+
+            int count = _ft4222.GetIlasLedCount();
+            int ilasCount = count > 0 ? Math.Min(ILAS_BROADCAST_LED_COUNT, count) : 0;
+            if (hasFio && ilasCount > 0) return Math.Max(LED_COUNT, ilasCount);
+            if (ilasCount > 0) return ilasCount;
+            return LED_COUNT;
+        }
+
+        private System.Collections.Generic.List<byte> GetTargetFidsForOspSend(byte fid)
+        {
+            var result = new System.Collections.Generic.List<byte>();
+            if (fid != 0x00)
+            {
+                result.Add(fid);
+                return result;
+            }
+
+            if (_ft4222 != null && _ft4222.IsConnected)
+            {
+                var activeFids = _ft4222.GetActiveFids();
+                foreach (byte activeFid in activeFids)
+                    if (activeFid >= 0x01 && activeFid <= 0x08)
+                        result.Add(activeFid);
+            }
+
+            return result;
+        }
         // =========================================================================
         // CIE 색도도 렌더링
         // =========================================================================
@@ -1027,7 +1245,8 @@ namespace LINMaster.Forms
             System.Collections.Generic.Dictionary<int, int> lastLevels,
             ref string lastWaveKey,
             System.Collections.Generic.List<int> waveOrder = null,
-            bool circularWave = false)
+            bool circularWave = false,
+            OspLedPath path = OspLedPath.Combined)
         {
             int peak = Math.Max(LED_SHIFT_BASE_BRIGHTNESS, Math.Min(250, peakBrightness));
             var order = waveOrder ?? activeNodes;
@@ -1091,12 +1310,261 @@ namespace LINMaster.Forms
                 txLevels.Add(level);
             }
 
-            if (txNodes.Count > 0 &&
-                _ft4222.SetColorRgbByNodes(fid, txNodes.ToArray(), txReds.ToArray(), txGreens.ToArray(), txBlues.ToArray(), txNodes.Count))
+            if (txNodes.Count == 0) return;
+
+            bool sent = SendColorRgbByNodesForPath(fid, txNodes.ToArray(), txReds.ToArray(), txGreens.ToArray(), txBlues.ToArray(), txNodes.Count, path);
+
+            if (sent)
             {
                 for (int i = 0; i < txNodes.Count; i++)
                     lastLevels[txNodes[i]] = txLevels[i];
             }
+        }
+
+        private bool SendColorRgbByNodesForPath(byte fid, ushort[] nodes, byte[] reds, byte[] greens, byte[] blues, int count, OspLedPath path)
+        {
+            UpdateTxRxFeedbackMode();
+
+            if (path == OspLedPath.FioOnly && !IsOspTxEnabled())
+                return true;
+            if (path == OspLedPath.IlasOnly && !IsIlasTxEnabled())
+                return true;
+
+            if (path == OspLedPath.FioOnly)
+            {
+                if (OSP_VERBOSE_NODE_TX_LOG)
+                    OspMessage?.Invoke(string.Format(
+                        "[CIE OSP] FIO nodes TX FID=0x{0:X2} count={1} nodes=[{2}]",
+                        fid, count, string.Join(",", nodes.Take(count))));
+            }
+            else if (path == OspLedPath.IlasOnly)
+            {
+                if (OSP_VERBOSE_NODE_TX_LOG)
+                    OspMessage?.Invoke(string.Format(
+                        "[CIE OSP] ILAS nodes TX FID=0x{0:X2} count={1} first={2} last={3}",
+                        fid, count, count > 0 ? nodes[0].ToString() : "-",
+                        count > 0 ? nodes[count - 1].ToString() : "-"));
+            }
+
+            if (path == OspLedPath.FioOnly)
+                return _ft4222.SetFioColorRgbByNodes(fid, nodes, reds, greens, blues, count);
+            if (path == OspLedPath.IlasOnly)
+                return _ft4222.SetIlasColorRgbByNodes(fid, nodes, reds, greens, blues, count);
+
+            if (IsOspTxEnabled() && !IsIlasTxEnabled())
+                return _ft4222.SetFioColorRgbByNodes(fid, nodes, reds, greens, blues, count);
+
+            bool sent = false;
+            foreach (byte targetFid in GetTargetFidsForOspSend(fid))
+            {
+                if (!IsOspTxEnabled() && !IsIlasTxEnabled())
+                    continue;
+                if (IsOspTxEnabled() && IsIlasTxEnabled())
+                {
+                    if (_ft4222.SetColorRgbByNodes(targetFid, nodes, reds, greens, blues, count))
+                        sent = true;
+                    continue;
+                }
+                if (IsOspTxEnabled() && _ft4222.SetFioColorRgbByNodes(targetFid, nodes, reds, greens, blues, count))
+                    sent = true;
+                if (IsIlasTxEnabled() && _ft4222.SetIlasColorRgbByNodes(targetFid, nodes, reds, greens, blues, count))
+                    sent = true;
+            }
+            return sent;
+        }
+        private bool SendSolidColorNodesForPath(byte fid, System.Collections.Generic.List<int> activeNodes, LedRgb rgb, OspLedPath path, string label)
+        {
+            if (activeNodes == null || activeNodes.Count == 0) return false;
+
+            ushort[] nodes = new ushort[activeNodes.Count];
+            byte[] reds = new byte[activeNodes.Count];
+            byte[] greens = new byte[activeNodes.Count];
+            byte[] blues = new byte[activeNodes.Count];
+
+            for (int i = 0; i < activeNodes.Count; i++)
+            {
+                nodes[i] = (ushort)activeNodes[i];
+                reds[i] = rgb.R;
+                greens[i] = rgb.G;
+                blues[i] = rgb.B;
+            }
+
+            bool ok = SendColorRgbByNodesForPath(fid, nodes, reds, greens, blues, activeNodes.Count, path);
+            if (ok)
+            {
+                foreach (int nodeAddr in activeNodes)
+                    RememberNodeRgb(nodeAddr, rgb);
+                OspMessage?.Invoke(string.Format(
+                    "[CIE OSP] FID=0x{0:X2} {1} batch TX complete ({2} nodes)",
+                    fid, label, activeNodes.Count));
+            }
+            else
+            {
+                OspMessage?.Invoke(string.Format(
+                    "[CIE OSP] FID=0x{0:X2} {1} batch TX failed: {2}",
+                    fid, label, _ft4222.LastError.Replace("\r\n", " / ")));
+            }
+            return ok;
+        }
+
+        private bool SendBroadcastIlasSolidColor(LedRgb rgb, double cx, double cy, double brightness)
+        {
+            if (!IsIlasTxEnabled())
+                return true;
+            if (!HasAnyIlasActiveTarget())
+                return true;
+
+            int ilasCount = GetBroadcastIlasLedCount();
+            var ilasNodes = ilasCount > 0 ? BuildNodeRange(1, ilasCount) : new System.Collections.Generic.List<int>();
+            if (ilasNodes.Count == 0)
+                return true;
+
+            OspMessage?.Invoke(string.Format(
+                "[CIE OSP] FID=0x00 Broadcast -> ILAS batch {0}개 노드  x={1:F4} y={2:F4} bri={3:F3}",
+                ilasNodes.Count, cx, cy, brightness));
+
+            return SendSolidColorNodesForPath(0x00, ilasNodes, rgb, OspLedPath.IlasOnly, "ILAS");
+        }
+
+        private bool AreAllFioNodesSelected(System.Collections.Generic.List<int> nodes)
+        {
+            if (nodes == null || nodes.Count != LED_COUNT)
+                return false;
+
+            for (int node = 1; node <= LED_COUNT; node++)
+                if (!nodes.Contains(node))
+                    return false;
+
+            return true;
+        }
+
+        private bool SendFioSolidColorForSelection(byte fid, LedRgb rgb)
+        {
+            var fioNodes = GetFioActiveNodesFromSlaveFlags();
+            if (fioNodes.Count == 0)
+                return false;
+
+            if (AreAllFioNodesSelected(fioNodes))
+            {
+                ushort[] nodes = { 0 };
+                byte[] reds = { rgb.R };
+                byte[] greens = { rgb.G };
+                byte[] blues = { rgb.B };
+                bool ok = _ft4222.SetFioColorRgbByNodes(fid, nodes, reds, greens, blues, 1);
+                if (ok)
+                {
+                    foreach (int nodeAddr in fioNodes)
+                        RememberNodeRgb(nodeAddr, rgb);
+                    OspMessage?.Invoke(string.Format(
+                        "[CIE OSP] FID=0x{0:X2} FIO broadcast TX complete ({1} nodes)",
+                        fid, fioNodes.Count));
+                }
+                else
+                {
+                    OspMessage?.Invoke(string.Format(
+                        "[CIE OSP] FID=0x{0:X2} FIO broadcast TX failed: {1}",
+                        fid, _ft4222.LastError.Replace("\r\n", " / ")));
+                }
+                return ok;
+            }
+
+            return SendSolidColorNodesForPath(fid, fioNodes, rgb, OspLedPath.FioOnly, "FIO");
+        }
+
+        private bool SendColorRgbByFidForSelection(byte fid, LedRgb rgb)
+        {
+            bool sentAny = false;
+            bool failedAny = false;
+
+            if (fid == 0x00)
+            {
+                if (IsOspTxEnabled())
+                {
+                    bool okFio = SendFioSolidColorForSelection(0x00, rgb);
+                    sentAny |= okFio;
+                    failedAny |= !okFio;
+                }
+
+                if (IsIlasTxEnabled() && HasAnyIlasActiveTarget())
+                {
+                    int ilasCount = GetBroadcastIlasLedCount();
+                    var ilasNodes = ilasCount > 0 ? BuildNodeRange(1, ilasCount) : new System.Collections.Generic.List<int>();
+                    if (ilasNodes.Count > 0)
+                    {
+                        bool okIlas = SendSolidColorNodesForPath(0x00, ilasNodes, rgb, OspLedPath.IlasOnly, "ILAS");
+                        sentAny |= okIlas;
+                        failedAny |= !okIlas;
+                    }
+                }
+
+                return sentAny || !failedAny;
+            }
+
+            foreach (byte targetFid in GetTargetFidsForOspSend(fid))
+            {
+                if (IsOspTxEnabled() && IsFioTarget(targetFid))
+                {
+                    bool okFio = SendFioSolidColorForSelection(targetFid, rgb);
+                    sentAny |= okFio;
+                    failedAny |= !okFio;
+                }
+
+                if (IsIlasTxEnabled() && IsIlasTarget(targetFid))
+                {
+                    int ilasCount = GetIlasLedCountForTarget(targetFid);
+                    var ilasNodes = ilasCount > 0 ? BuildNodeRange(1, ilasCount) : new System.Collections.Generic.List<int>();
+                    bool okIlas = SendSolidColorNodesForPath(targetFid, ilasNodes, rgb, OspLedPath.IlasOnly, "ILAS");
+                    sentAny |= okIlas;
+                    failedAny |= !okIlas;
+                }
+            }
+
+            return sentAny || !failedAny;
+        }
+
+        private bool SendRgbwNodesForPath(byte fid, System.Collections.Generic.List<int> activeNodes, byte level, int shiftOffset, OspLedPath path, string label)
+        {
+            if (activeNodes == null || activeNodes.Count == 0) return false;
+
+            ushort[] nodes = new ushort[activeNodes.Count];
+            byte[] reds = new byte[activeNodes.Count];
+            byte[] greens = new byte[activeNodes.Count];
+            byte[] blues = new byte[activeNodes.Count];
+
+            for (int i = 0; i < activeNodes.Count; i++)
+            {
+                int nodeAddr = activeNodes[i];
+                byte r = 0, g = 0, b = 0;
+                switch ((nodeAddr - 1 + shiftOffset) & 0x03)
+                {
+                    case 0: r = level; break;
+                    case 1: g = level; break;
+                    case 2: b = level; break;
+                    default: r = g = b = level; break;
+                }
+
+                nodes[i] = (ushort)nodeAddr;
+                reds[i] = r;
+                greens[i] = g;
+                blues[i] = b;
+            }
+
+            bool ok = SendColorRgbByNodesForPath(fid, nodes, reds, greens, blues, activeNodes.Count, path);
+            if (ok)
+            {
+                for (int i = 0; i < activeNodes.Count; i++)
+                    RememberNodeRgb(activeNodes[i], new LedRgb(reds[i], greens[i], blues[i]));
+                OspMessage?.Invoke(string.Format(
+                    "[CIE OSP] FID=0x{0:X2} {1} RGBW batch TX complete ({2} nodes)",
+                    fid, label, activeNodes.Count));
+            }
+            else
+            {
+                OspMessage?.Invoke(string.Format(
+                    "[CIE OSP] FID=0x{0:X2} {1} RGBW batch TX failed: {2}",
+                    fid, label, _ft4222.LastError.Replace("\r\n", " / ")));
+            }
+            return ok;
         }
 
         private static LedRgb GetEachControlRgb(byte fid, int level)
@@ -1122,12 +1590,13 @@ namespace LINMaster.Forms
             System.Collections.Generic.Dictionary<int, int> lastLevels,
             ref string lastWaveKey,
             System.Collections.Generic.List<int> waveOrder = null,
-            bool circularWave = false)
+            bool circularWave = false,
+            OspLedPath path = OspLedPath.Combined)
         {
-            if (fid != 0x00 || !chkEachControl.Checked)
+            if (path != OspLedPath.Combined || fid != 0x00 || !chkEachControl.Checked)
             {
                 SendLedShiftWave(fid, activeNodes, focusNodes, lockedNodes, cx, cy,
-                    peakBrightness, lastLevels, ref lastWaveKey, waveOrder, circularWave);
+                    peakBrightness, lastLevels, ref lastWaveKey, waveOrder, circularWave, path);
                 return;
             }
 
@@ -1185,7 +1654,7 @@ namespace LINMaster.Forms
                     greens[i] = rgb.G;
                     blues[i] = rgb.B;
                 }
-                _ft4222.SetColorRgbByNodes(targetFid, nodes, reds, greens, blues, activeNodes.Count);
+                SendColorRgbByNodesForPath(targetFid, nodes, reds, greens, blues, activeNodes.Count, OspLedPath.Combined);
             }
         }
 
@@ -1193,7 +1662,8 @@ namespace LINMaster.Forms
             byte fid,
             System.Collections.Generic.List<int> activeNodes,
             LedRgb baseRgb,
-            System.Collections.Generic.Dictionary<int, int> lastLevels)
+            System.Collections.Generic.Dictionary<int, int> lastLevels,
+            OspLedPath path = OspLedPath.Combined)
         {
             var nodes = new ushort[activeNodes.Count];
             var reds = new byte[activeNodes.Count];
@@ -1208,7 +1678,9 @@ namespace LINMaster.Forms
                 blues[i] = baseRgb.B;
             }
 
-            if (_ft4222.SetColorRgbByNodes(fid, nodes, reds, greens, blues, activeNodes.Count))
+            bool sent = SendColorRgbByNodesForPath(fid, nodes, reds, greens, blues, activeNodes.Count, path);
+
+            if (sent)
             {
                 lastLevels.Clear();
                 foreach (int n in activeNodes)
@@ -1227,7 +1699,25 @@ namespace LINMaster.Forms
             return new LedRgb((byte)r, (byte)g, (byte)b);
         }
 
-        private LedRgb GetTargetRgbForNode(int nodeAddr, LedRgb cieTarget, bool rgbwMode, int rgbwShift)
+
+        private static LedRgb LerpRgbKeepPeak(LedRgb start, LedRgb target, int step, int total)
+        {
+            LedRgb rgb = LerpRgb(start, target, step, total);
+            int startPeak = Math.Max(start.R, Math.Max(start.G, start.B));
+            int targetPeak = Math.Max(target.R, Math.Max(target.G, target.B));
+            int currentPeak = Math.Max(rgb.R, Math.Max(rgb.G, rgb.B));
+
+            if (startPeak == 0 || targetPeak == 0 || currentPeak == 0)
+                return rgb;
+
+            int safeTotal = Math.Max(1, total);
+            int safeStep = Math.Min(step, safeTotal);
+            int desiredPeak = startPeak + ((targetPeak - startPeak) * safeStep) / safeTotal;
+            int r = Math.Min(255, (rgb.R * desiredPeak + currentPeak / 2) / currentPeak);
+            int g = Math.Min(255, (rgb.G * desiredPeak + currentPeak / 2) / currentPeak);
+            int b = Math.Min(255, (rgb.B * desiredPeak + currentPeak / 2) / currentPeak);
+            return new LedRgb((byte)r, (byte)g, (byte)b);
+        }        private LedRgb GetTargetRgbForNode(int nodeAddr, LedRgb cieTarget, bool rgbwMode, int rgbwShift)
         {
             if (!rgbwMode) return cieTarget;
 
@@ -1307,12 +1797,7 @@ namespace LINMaster.Forms
             int rgbwShift  = rgbwMode && chkRGBWShift.Checked ? _rgbwShiftOffset : 0;
             LedRgb cieTarget = CieToLedRgb(cx, cy, bri);
 
-            CheckBox[] allSF = GetSlaveFlagBoxes();
-            int sfCount = Math.Min(LED_COUNT, allSF.Length);
-            _fadeActiveNodes = new System.Collections.Generic.List<int>();
-            for (int i = 0; i < sfCount; i++)
-                if (allSF[i].Checked)
-                    _fadeActiveNodes.Add(i + 1);
+            _fadeActiveNodes = GetActiveNodesForTarget(id);
 
             if (_fadeActiveNodes.Count == 0)
             {
@@ -1334,8 +1819,8 @@ namespace LINMaster.Forms
                 return;
             }
 
-            _fadeStartRgb = new LedRgb[LED_COUNT + 1];
-            _fadeTargetRgb = new LedRgb[LED_COUNT + 1];
+            _fadeStartRgb = new LedRgb[MAX_TRACKED_LED_COUNT + 1];
+            _fadeTargetRgb = new LedRgb[MAX_TRACKED_LED_COUNT + 1];
             LedRgb broadcastRgbwTarget = GetRgbwPhaseColor(rgbwShift);
             foreach (int nodeAddr in _fadeActiveNodes)
             {
@@ -1401,7 +1886,8 @@ namespace LINMaster.Forms
             {
                 if (_fadeMoveUseFidTx)
                 {
-                    if (_ft4222.SetColorRgbByFid(_fadeFid, rgb.R, rgb.G, rgb.B))
+                    bool sent = SendColorRgbByFidForSelection(_fadeFid, rgb);
+                    if (sent)
                     {
                         foreach (int nodeAddr in _fadeActiveNodes)
                             RememberNodeRgb(nodeAddr, rgb);
@@ -1421,8 +1907,14 @@ namespace LINMaster.Forms
                     blues[i] = rgb.B;
                 }
 
-                if (_ft4222.SetColorRgbByNodes(
-                    _fadeFid, nodes, reds, greens, blues, _fadeActiveNodes.Count))
+                bool batchSent = false;
+                foreach (byte targetFid in GetTargetFidsForOspSend(_fadeFid))
+                {
+                    if (SendColorRgbByNodesForPath(
+                        targetFid, nodes, reds, greens, blues, _fadeActiveNodes.Count, OspLedPath.Combined))
+                        batchSent = true;
+                }
+                if (batchSent)
                 {
                     foreach (int nodeAddr in _fadeActiveNodes)
                         RememberNodeRgb(nodeAddr, rgb);
@@ -1432,8 +1924,8 @@ namespace LINMaster.Forms
 
             // 일반/RGBW Fade는 FID 채널 전체에 한 번 전송한다.
             // FID 0x00: multicast 1회 / 그 외: 해당 FID 1회
-            byte fadeSendFid = _fadeFid;  // 0x00 → multicast, 0x01~0x08 → unicast
-            if (_ft4222.SetColorRgbByFid(fadeSendFid, rgb.R, rgb.G, rgb.B))
+            bool fadeSent = SendColorRgbByFidForSelection(_fadeFid, rgb);
+            if (fadeSent)
             {
                 foreach (int nodeAddr in _fadeActiveNodes)
                     RememberNodeRgb(nodeAddr, rgb);
@@ -1487,6 +1979,10 @@ namespace LINMaster.Forms
                 _ledShiftPrevOn.Clear();
                 _ledShiftLastLevels.Clear();
                 _ledShiftLastWaveKey = string.Empty;
+                _ledShiftFioLastLevels.Clear();
+                _ledShiftFioLastWaveKey = string.Empty;
+                _ledShiftIlasLastLevels.Clear();
+                _ledShiftIlasLastWaveKey = string.Empty;
             }
 
             if (chkLedShiftUp.Checked)
@@ -1495,17 +1991,33 @@ namespace LINMaster.Forms
                 _ledShiftUpStepHi   = 0;
                 _ledShiftUpLockedLo = 0;
                 _ledShiftUpLockedHi = 0;
+                _ledShiftUpFioStepLo = 0;
+                _ledShiftUpFioStepHi = 0;
+                _ledShiftUpIlasStepLo = 0;
+                _ledShiftUpIlasStepHi = 0;
                 _ledShiftUpPrevOn.Clear();
                 _ledShiftUpLastLevels.Clear();
                 _ledShiftUpLastWaveKey = string.Empty;
+                _ledShiftUpFioLastLevels.Clear();
+                _ledShiftUpIlasLastLevels.Clear();
+                _ledShiftUpFioLastWaveKey = string.Empty;
+                _ledShiftUpIlasLastWaveKey = string.Empty;
             }
 
             if (chkShiftStack.Checked)
             {
                 _shiftStackStep = 1;
                 _shiftStackLocked = 0;
+                _shiftStackFioStep = 1;
+                _shiftStackFioLocked = 0;
+                _shiftStackIlasStep = 1;
+                _shiftStackIlasLocked = 0;
                 _shiftStackLastLevels.Clear();
                 _shiftStackLastWaveKey = string.Empty;
+                _shiftStackFioLastLevels.Clear();
+                _shiftStackIlasLastLevels.Clear();
+                _shiftStackFioLastWaveKey = string.Empty;
+                _shiftStackIlasLastWaveKey = string.Empty;
             }
 
             if (chkShiftStackUp.Checked)
@@ -1514,8 +2026,20 @@ namespace LINMaster.Forms
                 _shiftStackUpStepHi = 0;
                 _shiftStackUpLockedLo = 0;
                 _shiftStackUpLockedHi = 0;
+                _shiftStackUpFioStepLo = 0;
+                _shiftStackUpFioStepHi = 0;
+                _shiftStackUpFioLockedLo = 0;
+                _shiftStackUpFioLockedHi = 0;
+                _shiftStackUpIlasStepLo = 0;
+                _shiftStackUpIlasStepHi = 0;
+                _shiftStackUpIlasLockedLo = 0;
+                _shiftStackUpIlasLockedHi = 0;
                 _shiftStackUpLastLevels.Clear();
                 _shiftStackUpLastWaveKey = string.Empty;
+                _shiftStackUpFioLastLevels.Clear();
+                _shiftStackUpIlasLastLevels.Clear();
+                _shiftStackUpFioLastWaveKey = string.Empty;
+                _shiftStackUpIlasLastWaveKey = string.Empty;
             }
 
             if (chkMove.Checked)
@@ -1524,7 +2048,7 @@ namespace LINMaster.Forms
                 _fadeIsMove = false;
             }
 
-            txTimer.Interval = Math.Max(10, (int)nudInterval.Value);
+            txTimer.Interval = Math.Max(1, (int)nudInterval.Value);
             txTimer.Start();
             btnTxCycle.Text = "■ 주기 TX 중지";
             btnTxCycle.BackColor = Color.FromArgb(160, 50, 50);
@@ -1533,40 +2057,49 @@ namespace LINMaster.Forms
         /// <summary>주기 TX 타이머 Tick – 연결 상태 확인 후 DoTx() 호출</summary>
         private void TxTimer_Tick(object sender, EventArgs e)
         {
+            if (_ospTxBusy) return;
             if (!CheckGW(silent: true)) { txTimer.Stop(); return; }
             if (_fadePhase != FadePhase.None) return;
 
-            if (chkLedShift.Checked)
+            _ospTxBusy = true;
+            try
             {
-                DoTxLedShift();
-                return;
-            }
+                if (chkLedShift.Checked)
+                {
+                    DoTxLedShift();
+                    return;
+                }
 
-            if (chkShiftStack.Checked)
+                if (chkShiftStack.Checked)
+                {
+                    DoTxShiftStack();
+                    return;
+                }
+
+                if (chkLedShiftUp.Checked)
+                {
+                    DoTxLedShiftUp();
+                    return;
+                }
+
+                if (chkShiftStackUp.Checked)
+                {
+                    DoTxShiftStackUp();
+                    return;
+                }
+
+                if (chkMove.Checked)
+                {
+                    DoTxMove();
+                    return;
+                }
+
+                DoTx(advanceRgbwShift: true);
+            }
+            finally
             {
-                DoTxShiftStack();
-                return;
+                _ospTxBusy = false;
             }
-
-            if (chkLedShiftUp.Checked)
-            {
-                DoTxLedShiftUp();
-                return;
-            }
-
-            if (chkShiftStackUp.Checked)
-            {
-                DoTxShiftStackUp();
-                return;
-            }
-
-            if (chkMove.Checked)
-            {
-                DoTxMove();
-                return;
-            }
-
-            DoTx(advanceRgbwShift: true);
         }
 
         /// <summary>Move 좌표를 한 개 전송하고 다음 좌표로 이동한다.</summary>
@@ -1596,12 +2129,7 @@ namespace LINMaster.Forms
             int moveFadeMs = fadeInMs > 0 ? fadeInMs : fadeOutMs;
             bool useMoveFade = !chkNoFade.Checked && moveFadeMs > 0;
 
-            CheckBox[] allSF = GetSlaveFlagBoxes();
-            int sfCount = Math.Min(LED_COUNT, allSF.Length);
-            var activeNodes = new System.Collections.Generic.List<int>();
-            for (int i = 0; i < sfCount; i++)
-                if (allSF[i].Checked)
-                    activeNodes.Add(i + 1);
+            var activeNodes = GetActiveNodesForTarget(fid);
 
             if (activeNodes.Count == 0)
             {
@@ -1614,8 +2142,8 @@ namespace LINMaster.Forms
                 fadeTimer.Stop();
                 _fadeFid = fid;
                 _fadeActiveNodes = activeNodes;
-                _fadeStartRgb = new LedRgb[LED_COUNT + 1];
-                _fadeTargetRgb = new LedRgb[LED_COUNT + 1];
+                _fadeStartRgb = new LedRgb[MAX_TRACKED_LED_COUNT + 1];
+                _fadeTargetRgb = new LedRgb[MAX_TRACKED_LED_COUNT + 1];
                 foreach (int node in activeNodes)
                 {
                     _fadeStartRgb[node] = GetCurrentNodeRgb(node);
@@ -1623,7 +2151,7 @@ namespace LINMaster.Forms
                 }
 
                 _fadeIsMove = true;
-                _fadeMoveUseFidTx = activeNodes.Count == sfCount;
+                _fadeMoveUseFidTx = activeNodes.Count == GetTargetLedCount(fid);
                 _fadePhase = FadePhase.Running;
                 _fadeTotalMs = Math.Max(1, moveFadeMs);
                 _fadeStopwatch.Restart();
@@ -1639,10 +2167,10 @@ namespace LINMaster.Forms
             }
 
             bool ok;
-            if (activeNodes.Count == sfCount)
+            if (activeNodes.Count == GetTargetLedCount(fid))
             {
                 // 전체 LED가 같은 색상이므로 FID 단위 한 번의 OSP 전송으로 처리한다.
-                ok = _ft4222.SetColorRgbByFid(fid, targetRgb.R, targetRgb.G, targetRgb.B);
+                ok = SendColorRgbByFidForSelection(fid, targetRgb);
             }
             else
             {
@@ -1659,8 +2187,8 @@ namespace LINMaster.Forms
                     blues[i] = targetRgb.B;
                 }
 
-                ok = _ft4222.SetColorRgbByNodes(
-                    fid, nodes, reds, greens, blues, activeNodes.Count);
+                ok = SendColorRgbByNodesForPath(
+                    fid, nodes, reds, greens, blues, activeNodes.Count, OspLedPath.Combined);
             }
 
             if (!ok)
@@ -1679,7 +2207,7 @@ namespace LINMaster.Forms
             OspMessage?.Invoke(string.Format(
                 "[CIE Move] {0}/{1} CX=0x{2:X2} CY=0x{3:X2} ({4}, {5} nodes, Fade={6}ms)",
                 index + 1, count, cx, cy,
-                activeNodes.Count == sfCount ? "FID TX" : "batch TX", activeNodes.Count,
+                activeNodes.Count == GetTargetLedCount(fid) ? "FID TX" : "batch TX", activeNodes.Count,
                 useMoveFade ? moveFadeMs : 0));
 
             _moveCoordinateIndex = (index + 1) % count;
@@ -1705,52 +2233,285 @@ namespace LINMaster.Forms
             byte id = GetFID();
             if (id > 0x08) return;
 
-            CheckBox[] allSF = GetSlaveFlagBoxes();
-            int sfCount = Math.Min(LED_COUNT, allSF.Length);
-            var activeNodes = new System.Collections.Generic.List<int>();
-            for (int i = 0; i < sfCount; i++)
-                if (allSF[i].Checked)
-                    activeNodes.Add(i + 1);
+            float cx = ByteToXY((byte)nudColorX.Value);
+            float cy = ByteToXY((byte)nudColorY.Value);
+            LedRgb baseRgb = CieToLedRgb(cx, cy, LED_SHIFT_BASE_BRIGHTNESS / 250.0f);
+            int width = Math.Max(1, (int)nudShiftWidth.Value);
 
+            if ((id == 0x00 && HasAnyIlasActiveTarget()) || IsSplitFioIlasTarget(id))
+            {
+                var fioNodes = GetFioActiveNodesFromSlaveFlags();
+                var ilasNodes = GetIlasNodesForShiftTarget(id);
+                int fioTotal = fioNodes.Count;
+                int ilasTotal = ilasNodes.Count;
+                if (fioTotal == 0 && ilasTotal == 0) return;
+
+                if (_ledShiftLocked == 0 && _ledShiftStep == 1 && _ledShiftPrevOn.Count == 0)
+                {
+                    if (fioTotal > 0)
+                        SendLedShiftBase(id, fioNodes, baseRgb, _ledShiftFioLastLevels, OspLedPath.FioOnly);
+                    if (ilasTotal > 0)
+                        SendLedShiftBase(id, ilasNodes, baseRgb, _ledShiftIlasLastLevels, OspLedPath.IlasOnly);
+                }
+
+                var fioOn = new System.Collections.Generic.List<int>();
+                var ilasOn = new System.Collections.Generic.List<int>();
+                if (fioTotal > 0)
+                {
+                    int fioStartIdx = (_ledShiftStep - 1) % fioTotal;
+                    for (int i = 0; i < width; i++)
+                        fioOn.Add(fioNodes[(fioStartIdx + i) % fioTotal]);
+                }
+                if (ilasTotal > 0)
+                {
+                    int ilasStartIdx = (_ledShiftStep - 1) % ilasTotal;
+                    for (int i = 0; i < width; i++)
+                        ilasOn.Add(ilasNodes[(ilasStartIdx + i) % ilasTotal]);
+                }
+
+                var lockedNodes = new System.Collections.Generic.List<int>();
+                if (fioTotal > 0)
+                    SendLedShiftWave(id, fioNodes, fioOn, lockedNodes, cx, cy, (int)nudBrightness.Value,
+                        _ledShiftFioLastLevels, ref _ledShiftFioLastWaveKey, null, false, OspLedPath.FioOnly);
+                if (ilasTotal > 0)
+                    SendLedShiftWave(id, ilasNodes, ilasOn, lockedNodes, cx, cy, (int)nudBrightness.Value,
+                        _ledShiftIlasLastLevels, ref _ledShiftIlasLastWaveKey, null, false, OspLedPath.IlasOnly);
+
+                string fioStepText = fioTotal > 0 ? string.Format("{0}/{1}", ((_ledShiftStep - 1) % fioTotal) + 1, fioTotal) : "OFF";
+                string ilasStepText = ilasTotal > 0 ? string.Format("{0}/{1}", ((_ledShiftStep - 1) % ilasTotal) + 1, ilasTotal) : "OFF";
+                if (CIE_SHIFT_VERBOSE_LOG)
+                    OspMessage?.Invoke(string.Format(
+                        "[CIE LED_Shift] FID=0x{0:X2} split FIO step={1} on={2} / ILAS step={3} on={4}",
+                        id, fioStepText, string.Join(",", fioOn),
+                        ilasStepText, string.Join(",", ilasOn)));
+
+                _ledShiftPrevOn.Clear();
+                _ledShiftPrevOn.AddRange(fioOn);
+                _ledShiftStep += width;
+                return;
+            }
+
+            var activeNodes = GetActiveNodesForTarget(id);
             if (activeNodes.Count == 0) return;
 
             int totalNodes = activeNodes.Count;
-            int width      = Math.Max(1, (int)nudShiftWidth.Value);  // 한 Tick에 이동할 LED 수
-
-            // ON 색상
-            float cx  = ByteToXY((byte)nudColorX.Value);
-            float cy  = ByteToXY((byte)nudColorY.Value);
-            float bri = (float)nudBrightness.Value / 250.0f;
-            LedRgb onRgb = CieToLedRgb(cx, cy, bri);
-            LedRgb baseRgb = CieToLedRgb(cx, cy, LED_SHIFT_BASE_BRIGHTNESS / 250.0f);
-
             if (_ledShiftLocked == 0 && _ledShiftStep == 1 && _ledShiftPrevOn.Count == 0)
             {
                 SendLedShiftBase(id, activeNodes, baseRgb, _ledShiftLastLevels);
             }
 
-            int seqCount = totalNodes;
-
-            // 이번 Tick에 ON할 노드: 끝에 도달하면 처음으로 자연스럽게 반복
             int startIdx = _ledShiftStep - 1;
             var nowOn = new System.Collections.Generic.List<int>();
             for (int i = 0; i < width; i++)
                 nowOn.Add(activeNodes[(startIdx + i) % totalNodes]);
 
-            var lockedNodes = new System.Collections.Generic.List<int>();
-
-            SendLedShiftWaveSelected(id, activeNodes, nowOn, lockedNodes, cx, cy, (int)nudBrightness.Value,
+            var lockedNodes2 = new System.Collections.Generic.List<int>();
+            SendLedShiftWaveSelected(id, activeNodes, nowOn, lockedNodes2, cx, cy, (int)nudBrightness.Value,
                 _ledShiftLastLevels, ref _ledShiftLastWaveKey);
 
-            OspMessage?.Invoke(string.Format(
-                "[CIE LED_Shift] step={0}/{1} on={2}",
-                _ledShiftStep, seqCount,
-                string.Join(",", nowOn)));
+            if (CIE_SHIFT_VERBOSE_LOG)
+                OspMessage?.Invoke(string.Format(
+                    "[CIE LED_Shift] step={0}/{1} on={2}",
+                    _ledShiftStep, totalNodes,
+                    string.Join(",", nowOn)));
 
             _ledShiftPrevOn.Clear();
             _ledShiftPrevOn.AddRange(nowOn);
-
             _ledShiftStep = ((_ledShiftStep - 1 + width) % totalNodes) + 1;
+        }
+        private void DoShiftStackPath(
+            byte fid,
+            System.Collections.Generic.List<int> activeNodes,
+            ref int step,
+            ref int locked,
+            System.Collections.Generic.Dictionary<int, int> lastLevels,
+            ref string lastWaveKey,
+            OspLedPath path,
+            string label)
+        {
+            if (activeNodes == null || activeNodes.Count == 0) return;
+
+            int totalNodes = activeNodes.Count;
+            int width = Math.Max(1, (int)nudShiftWidth.Value);
+
+            if (locked >= totalNodes)
+            {
+                step = 1;
+                locked = 0;
+                lastLevels.Clear();
+                lastWaveKey = string.Empty;
+            }
+
+            float cx = ByteToXY((byte)nudColorX.Value);
+            float cy = ByteToXY((byte)nudColorY.Value);
+            LedRgb baseRgb = CieToLedRgb(cx, cy, LED_SHIFT_BASE_BRIGHTNESS / 250.0f);
+
+            if (locked == 0 && step == 1)
+                SendLedShiftBase(fid, activeNodes, baseRgb, lastLevels, path);
+
+            int movingCount = totalNodes - locked;
+            int startIdx = Math.Min(step - 1, movingCount - 1);
+            int endIdx = Math.Min(movingCount - 1, startIdx + width - 1);
+
+            var nowOn = new System.Collections.Generic.List<int>();
+            for (int i = startIdx; i <= endIdx; i++)
+                nowOn.Add(activeNodes[i]);
+
+            var lockedNodes = new System.Collections.Generic.List<int>();
+            for (int i = movingCount; i < totalNodes; i++)
+                lockedNodes.Add(activeNodes[i]);
+
+            SendLedShiftWaveSelected(fid, activeNodes, nowOn, lockedNodes, cx, cy, (int)nudBrightness.Value,
+                lastLevels, ref lastWaveKey, activeNodes, circularWave: false, path: path);
+
+            if (CIE_SHIFT_VERBOSE_LOG)
+                OspMessage?.Invoke(string.Format(
+                    "[CIE Shift Stack] {0} step={1}/{2} locked={3} on={4}",
+                    label, step, movingCount, locked, string.Join(",", nowOn)));
+
+            if (endIdx >= movingCount - 1)
+            {
+                locked++;
+                step = 1;
+            }
+            else
+            {
+                step += width;
+            }
+        }
+
+        private void DoShiftUpPath(
+            byte fid,
+            System.Collections.Generic.List<int> shiftNodes,
+            ref int stepLo,
+            ref int stepHi,
+            System.Collections.Generic.Dictionary<int, int> lastLevels,
+            ref string lastWaveKey,
+            OspLedPath path,
+            string label)
+        {
+            if (shiftNodes == null || shiftNodes.Count == 0) return;
+
+            int totalNodes = shiftNodes.Count;
+            const int width = 1;
+            float cx = ByteToXY((byte)nudColorX.Value);
+            float cy = ByteToXY((byte)nudColorY.Value);
+            LedRgb baseRgb = CieToLedRgb(cx, cy, LED_SHIFT_BASE_BRIGHTNESS / 250.0f);
+
+            if (stepLo == 0 && stepHi == 0 && lastLevels.Count == 0)
+                SendLedShiftBase(fid, shiftNodes, baseRgb, lastLevels, path);
+
+            int centerLow = (totalNodes - 1) / 2;
+            int centerHigh = Math.Min(totalNodes - 1, centerLow + 1);
+            int seqLo = 0;
+            int seqHi = totalNodes - 1;
+
+            int loHiIdx = centerLow - stepLo * width;
+            int loLoIdx = loHiIdx - (width - 1);
+            int hiLoIdx = centerHigh + stepHi * width;
+            int hiHiIdx = hiLoIdx + (width - 1);
+
+            loLoIdx = Math.Max(seqLo, loLoIdx);
+            loHiIdx = Math.Max(seqLo, loHiIdx);
+            hiLoIdx = Math.Min(seqHi, hiLoIdx);
+            hiHiIdx = Math.Min(seqHi, hiHiIdx);
+
+            var nowOn = new System.Collections.Generic.List<int>();
+            for (int i = loLoIdx; i <= loHiIdx; i++)
+                if (!nowOn.Contains(shiftNodes[i])) nowOn.Add(shiftNodes[i]);
+            for (int i = hiLoIdx; i <= hiHiIdx; i++)
+                if (!nowOn.Contains(shiftNodes[i])) nowOn.Add(shiftNodes[i]);
+
+            var lockedNodes = new System.Collections.Generic.List<int>();
+            SendLedShiftWaveSelected(fid, shiftNodes, nowOn, lockedNodes, cx, cy, (int)nudBrightness.Value,
+                lastLevels, ref lastWaveKey, shiftNodes, circularWave: false, path: path);
+
+            if (CIE_SHIFT_VERBOSE_LOG)
+                OspMessage?.Invoke(string.Format(
+                    "[CIE LED_Shift_Up] {0} stepLo={1} stepHi={2} on={3}",
+                    label, stepLo, stepHi, string.Join(",", nowOn)));
+
+            stepLo++;
+            stepHi++;
+            if (loLoIdx <= seqLo) stepLo = 0;
+            if (hiHiIdx >= seqHi) stepHi = 0;
+        }
+
+        private void DoShiftStackUpPath(
+            byte fid,
+            System.Collections.Generic.List<int> shiftNodes,
+            ref int stepLo,
+            ref int stepHi,
+            ref int lockedLo,
+            ref int lockedHi,
+            System.Collections.Generic.Dictionary<int, int> lastLevels,
+            ref string lastWaveKey,
+            OspLedPath path,
+            string label)
+        {
+            if (shiftNodes == null || shiftNodes.Count == 0) return;
+
+            int totalNodes = shiftNodes.Count;
+            const int width = 1;
+
+            if (lockedLo + lockedHi >= totalNodes)
+            {
+                stepLo = 0;
+                stepHi = 0;
+                lockedLo = 0;
+                lockedHi = 0;
+                lastLevels.Clear();
+                lastWaveKey = string.Empty;
+            }
+
+            float cx = ByteToXY((byte)nudColorX.Value);
+            float cy = ByteToXY((byte)nudColorY.Value);
+            LedRgb baseRgb = CieToLedRgb(cx, cy, LED_SHIFT_BASE_BRIGHTNESS / 250.0f);
+
+            if (lockedLo == 0 && lockedHi == 0 && stepLo == 0 && stepHi == 0)
+                SendLedShiftBase(fid, shiftNodes, baseRgb, lastLevels, path);
+
+            int seqLo = lockedLo;
+            int seqHi = totalNodes - 1 - lockedHi;
+            int centerLow = Math.Max(seqLo, Math.Min(seqHi, (totalNodes - 1) / 2));
+            int centerHigh = Math.Max(seqLo, Math.Min(seqHi, Math.Min(totalNodes - 1, centerLow + 1)));
+
+            int loHiIdx = centerLow - stepLo * width;
+            int loLoIdx = loHiIdx - (width - 1);
+            int hiLoIdx = centerHigh + stepHi * width;
+            int hiHiIdx = hiLoIdx + (width - 1);
+
+            loLoIdx = Math.Max(seqLo, loLoIdx);
+            loHiIdx = Math.Max(seqLo, Math.Min(seqHi, loHiIdx));
+            hiLoIdx = Math.Max(seqLo, Math.Min(seqHi, hiLoIdx));
+            hiHiIdx = Math.Min(seqHi, hiHiIdx);
+
+            var nowOn = new System.Collections.Generic.List<int>();
+            for (int i = loLoIdx; i <= loHiIdx; i++)
+                if (!nowOn.Contains(shiftNodes[i])) nowOn.Add(shiftNodes[i]);
+            for (int i = hiLoIdx; i <= hiHiIdx; i++)
+                if (!nowOn.Contains(shiftNodes[i])) nowOn.Add(shiftNodes[i]);
+
+            var lockedNodes = new System.Collections.Generic.List<int>();
+            for (int i = 0; i < seqLo; i++) lockedNodes.Add(shiftNodes[i]);
+            for (int i = seqHi + 1; i < totalNodes; i++) lockedNodes.Add(shiftNodes[i]);
+
+            SendLedShiftWaveSelected(fid, shiftNodes, nowOn, lockedNodes, cx, cy, (int)nudBrightness.Value,
+                lastLevels, ref lastWaveKey, shiftNodes, circularWave: false, path: path);
+
+            if (CIE_SHIFT_VERBOSE_LOG)
+                OspMessage?.Invoke(string.Format(
+                    "[CIE Shift Stack Up] {0} stepLo={1} stepHi={2} lockedLo={3} lockedHi={4} on={5}",
+                    label, stepLo, stepHi, lockedLo, lockedHi, string.Join(",", nowOn)));
+
+            bool lowArrived = loLoIdx <= seqLo;
+            bool highArrived = hiHiIdx >= seqHi;
+
+            if (lowArrived) { lockedLo++; stepLo = 0; } else { stepLo++; }
+            if (lockedLo + lockedHi < totalNodes)
+            {
+                if (highArrived) { lockedHi++; stepHi = 0; } else { stepHi++; }
+            }
         }
 
         /// <summary>Shift와 동일하게 이동하고, 도착한 끝 LED를 LED25부터 역순으로 누적한다.</summary>
@@ -1761,12 +2522,20 @@ namespace LINMaster.Forms
             byte id = GetFID();
             if (id > 0x08) return;
 
-            CheckBox[] allSF = GetSlaveFlagBoxes();
-            int sfCount = Math.Min(LED_COUNT, allSF.Length);
-            var activeNodes = new System.Collections.Generic.List<int>();
-            for (int i = 0; i < sfCount; i++)
-                if (allSF[i].Checked)
-                    activeNodes.Add(i + 1);
+            if ((id == 0x00 && HasAnyIlasActiveTarget()) || IsSplitFioIlasTarget(id))
+            {
+                DoShiftStackPath(id, GetFioActiveNodesFromSlaveFlags(),
+                    ref _shiftStackFioStep, ref _shiftStackFioLocked,
+                    _shiftStackFioLastLevels, ref _shiftStackFioLastWaveKey,
+                    OspLedPath.FioOnly, "FIO");
+                DoShiftStackPath(id, GetIlasNodesForShiftTarget(id),
+                    ref _shiftStackIlasStep, ref _shiftStackIlasLocked,
+                    _shiftStackIlasLastLevels, ref _shiftStackIlasLastWaveKey,
+                    OspLedPath.IlasOnly, "ILAS");
+                return;
+            }
+
+            var activeNodes = GetActiveNodesForTarget(id);
 
             if (activeNodes.Count == 0) return;
 
@@ -1803,9 +2572,10 @@ namespace LINMaster.Forms
             SendLedShiftWaveSelected(id, activeNodes, nowOn, lockedNodes, cx, cy, (int)nudBrightness.Value,
                 _shiftStackLastLevels, ref _shiftStackLastWaveKey);
 
-            OspMessage?.Invoke(string.Format(
-                "[CIE Shift Stack] step={0}/{1} locked={2} on={3}",
-                _shiftStackStep, movingCount, _shiftStackLocked, string.Join(",", nowOn)));
+            if (CIE_SHIFT_VERBOSE_LOG)
+                OspMessage?.Invoke(string.Format(
+                    "[CIE Shift Stack] step={0}/{1} locked={2} on={3}",
+                    _shiftStackStep, movingCount, _shiftStackLocked, string.Join(",", nowOn)));
 
             if (endIdx >= movingCount - 1)
             {
@@ -1839,10 +2609,20 @@ namespace LINMaster.Forms
             byte id = GetFID();
             if (id > 0x08) return;
 
-            // SF 체크 개수와 무관하게 물리 LED2~LED25를 고정 사용한다.
-            var shiftNodes = new System.Collections.Generic.List<int>();
-            for (int node = 2; node <= LED_COUNT; node++)
-                shiftNodes.Add(node);
+            if ((id == 0x00 && HasAnyIlasActiveTarget()) || IsSplitFioIlasTarget(id))
+            {
+                DoShiftUpPath(id, GetFioShiftUpNodes(),
+                    ref _ledShiftUpFioStepLo, ref _ledShiftUpFioStepHi,
+                    _ledShiftUpFioLastLevels, ref _ledShiftUpFioLastWaveKey,
+                    OspLedPath.FioOnly, "FIO");
+                DoShiftUpPath(id, GetIlasNodesForShiftTarget(id),
+                    ref _ledShiftUpIlasStepLo, ref _ledShiftUpIlasStepHi,
+                    _ledShiftUpIlasLastLevels, ref _ledShiftUpIlasLastWaveKey,
+                    OspLedPath.IlasOnly, "ILAS");
+                return;
+            }
+
+            var shiftNodes = GetShiftUpNodesForTarget(id);
 
             int totalNodes = shiftNodes.Count;
             const int width = 1;
@@ -1859,7 +2639,7 @@ namespace LINMaster.Forms
                 _ledShiftUpPrevOn.Count == 0)
             {
                 SendLedShiftBase(id, shiftNodes, baseRgb, _ledShiftUpLastLevels);
-                _ft4222.SetColorRgbByNode(id, 1, 0, 0, 0);
+                if (!IsIlasTarget(id)) _ft4222.SetColorRgbByNode(id, 1, 0, 0, 0);
             }
 
             // LED2~LED25의 중앙: node13(idx11), node14(idx12)
@@ -1894,10 +2674,11 @@ namespace LINMaster.Forms
             SendLedShiftWaveSelected(id, shiftNodes, nowOn, lockedNodes, cx, cy, (int)nudBrightness.Value,
                 _ledShiftUpLastLevels, ref _ledShiftUpLastWaveKey, shiftNodes, circularWave: false);
 
-            OspMessage?.Invoke(string.Format(
-                "[CIE LED_Shift_Up] stepLo={0} stepHi={1} on={2}",
-                _ledShiftUpStepLo, _ledShiftUpStepHi,
-                string.Join(",", nowOn)));
+            if (CIE_SHIFT_VERBOSE_LOG)
+                OspMessage?.Invoke(string.Format(
+                    "[CIE LED_Shift_Up] stepLo={0} stepHi={1} on={2}",
+                    _ledShiftUpStepLo, _ledShiftUpStepHi,
+                    string.Join(",", nowOn)));
 
             _ledShiftUpPrevOn.Clear();
             _ledShiftUpPrevOn.AddRange(nowOn);
@@ -1924,10 +2705,22 @@ namespace LINMaster.Forms
             byte id = GetFID();
             if (id > 0x08) return;
 
-            // SF 체크 개수와 무관하게 물리 LED2~LED25를 고정 사용한다.
-            var shiftNodes = new System.Collections.Generic.List<int>();
-            for (int node = 2; node <= LED_COUNT; node++)
-                shiftNodes.Add(node);
+            if ((id == 0x00 && HasAnyIlasActiveTarget()) || IsSplitFioIlasTarget(id))
+            {
+                DoShiftStackUpPath(id, GetFioShiftUpNodes(),
+                    ref _shiftStackUpFioStepLo, ref _shiftStackUpFioStepHi,
+                    ref _shiftStackUpFioLockedLo, ref _shiftStackUpFioLockedHi,
+                    _shiftStackUpFioLastLevels, ref _shiftStackUpFioLastWaveKey,
+                    OspLedPath.FioOnly, "FIO");
+                DoShiftStackUpPath(id, GetIlasNodesForShiftTarget(id),
+                    ref _shiftStackUpIlasStepLo, ref _shiftStackUpIlasStepHi,
+                    ref _shiftStackUpIlasLockedLo, ref _shiftStackUpIlasLockedHi,
+                    _shiftStackUpIlasLastLevels, ref _shiftStackUpIlasLastWaveKey,
+                    OspLedPath.IlasOnly, "ILAS");
+                return;
+            }
+
+            var shiftNodes = GetShiftUpNodesForTarget(id);
 
             int totalNodes = shiftNodes.Count;
             const int width = 1;
@@ -1950,7 +2743,7 @@ namespace LINMaster.Forms
                 _shiftStackUpStepLo == 0 && _shiftStackUpStepHi == 0)
             {
                 SendLedShiftBase(id, shiftNodes, baseRgb, _shiftStackUpLastLevels);
-                _ft4222.SetColorRgbByNode(id, 1, 0, 0, 0);
+                if (!IsIlasTarget(id)) _ft4222.SetColorRgbByNode(id, 1, 0, 0, 0);
             }
 
             int seqLo = _shiftStackUpLockedLo;
@@ -1984,10 +2777,11 @@ namespace LINMaster.Forms
             SendLedShiftWaveSelected(id, shiftNodes, nowOn, lockedNodes, cx, cy, (int)nudBrightness.Value,
                 _shiftStackUpLastLevels, ref _shiftStackUpLastWaveKey, shiftNodes, circularWave: false);
 
-            OspMessage?.Invoke(string.Format(
-                "[CIE Shift Stack Up] stepLo={0} stepHi={1} lockedLo={2} lockedHi={3} on={4}",
-                _shiftStackUpStepLo, _shiftStackUpStepHi,
-                _shiftStackUpLockedLo, _shiftStackUpLockedHi, string.Join(",", nowOn)));
+            if (CIE_SHIFT_VERBOSE_LOG)
+                OspMessage?.Invoke(string.Format(
+                    "[CIE Shift Stack Up] stepLo={0} stepHi={1} lockedLo={2} lockedHi={3} on={4}",
+                    _shiftStackUpStepLo, _shiftStackUpStepHi,
+                    _shiftStackUpLockedLo, _shiftStackUpLockedHi, string.Join(",", nowOn)));
 
             bool lowArrived = loLoIdx <= seqLo;
             bool highArrived = hiHiIdx >= seqHi;
@@ -2035,6 +2829,8 @@ namespace LINMaster.Forms
         /// </summary>
         private void DoTxImmediate(bool advanceRgbwShift = false)
         {
+            UpdateTxRxFeedbackMode();
+
             byte id = GetFID();
             var data = BuildData();
 
@@ -2095,7 +2891,7 @@ namespace LINMaster.Forms
 
                         // 전체 LED 동일 색상 → multicast 핸들로 1회 전송
                         bool anyFailBc = false;
-                        bool okBc = _ft4222.SetColorRgbByFid(0x00, r, g, b);
+                        bool okBc = SendColorRgbByFidForSelection(0x00, new LedRgb(r, g, b));
                         if (!okBc)
                         {
                             anyFailBc = true;
@@ -2116,41 +2912,91 @@ namespace LINMaster.Forms
                     }
                     else
                     {
-                        // 일반 Broadcast: multicast 핸들로 1회 전송 (모든 AD3304 동시)
-                        OspMessage?.Invoke(string.Format(
-                            "[CIE OSP] FID=0x00 Broadcast (multicast 1회)  x={0:F4} y={1:F4} bri={2:F3}",
-                            cx, cy, brightness));
-                        bool ok = _ft4222.SetColorCIEByFid(0x00, cx, cy, brightness);
-                        if (lblFT4222Status != null)
+                        var fioNodes = GetFioActiveNodesFromSlaveFlags();
+                        if (fioNodes.Count == 0)
                         {
-                            lblFT4222Status.Text = ok
-                                ? "● FID 0x00 Broadcast TX complete"
-                                : "FT4222 OSP TX 실패 (FID=0x00 Broadcast)";
-                            lblFT4222Status.ForeColor = ok ? Color.Yellow : Color.OrangeRed;
+                            OspMessage?.Invoke("[CIE OSP] SlaveFlag 활성 없음 → 전송 건너뜀");
+                            return;
                         }
-                        if (!ok)
-                            OspMessage?.Invoke("[CIE OSP] Broadcast TX failed: " + _ft4222.LastError.Replace("\r\n", " / "));
+
+                        if (fioNodes.Count == LED_COUNT)
+                        {
+                            // SF1~SF25가 모두 선택된 경우에만 multicast 1회 전송
+                            OspMessage?.Invoke(string.Format(
+                                "[CIE OSP] FID=0x00 Broadcast (multicast 1회, SF 전체)  x={0:F4} y={1:F4} bri={2:F3}",
+                                cx, cy, brightness));
+                            LedRgb broadcastRgb = CieToLedRgb(cx, cy, brightness);
+                            bool ok = IsOspTxEnabled()
+                                ? SendFioSolidColorForSelection(0x00, broadcastRgb)
+                                : true;
+                            bool okIlas = SendBroadcastIlasSolidColor(broadcastRgb, cx, cy, brightness);
+                            if (lblFT4222Status != null)
+                            {
+                                lblFT4222Status.Text = ok && okIlas
+                                    ? "● FID 0x00 Broadcast TX complete"
+                                    : "FT4222 OSP TX 실패 (FID=0x00 Broadcast)";
+                                lblFT4222Status.ForeColor = ok && okIlas ? Color.Yellow : Color.OrangeRed;
+                            }
+                            if (!ok)
+                                OspMessage?.Invoke("[CIE OSP] Broadcast TX failed: " + _ft4222.LastError.Replace("\r\n", " / "));
+                        }
+                        else
+                        {
+                            // SF 일부만 선택된 경우 FID=0x00이라도 선택 노드만 unicast 전송
+                            OspMessage?.Invoke(string.Format(
+                                "[CIE OSP] FID=0x00 Broadcast target, SF unicast {0}개 노드  x={1:F4} y={2:F4} bri={3:F3}",
+                                fioNodes.Count, cx, cy, brightness));
+
+                            LedRgb fioTargetRgb = CieToLedRgb(cx, cy, brightness);
+                            ushort[] nodes = new ushort[fioNodes.Count];
+                            byte[] reds = new byte[fioNodes.Count];
+                            byte[] greens = new byte[fioNodes.Count];
+                            byte[] blues = new byte[fioNodes.Count];
+                            for (int i = 0; i < fioNodes.Count; i++)
+                            {
+                                nodes[i] = (ushort)fioNodes[i];
+                                reds[i] = fioTargetRgb.R;
+                                greens[i] = fioTargetRgb.G;
+                                blues[i] = fioTargetRgb.B;
+                            }
+
+                            OspMessage?.Invoke(string.Format(
+                                "[CIE OSP] FIO nodes TX FID=0x00 count={0} nodes=[{1}]",
+                                fioNodes.Count, string.Join(",", nodes)));
+
+                            bool okBatch = IsOspTxEnabled() ? SendFioSolidColorForSelection(0x00, fioTargetRgb) : true;
+                            bool okIlas = SendBroadcastIlasSolidColor(fioTargetRgb, cx, cy, brightness);
+                            if (okBatch)
+                            {
+                                foreach (int nodeAddr in fioNodes)
+                                    RememberNodeRgb(nodeAddr, fioTargetRgb);
+                            }
+                            else
+                            {
+                                OspMessage?.Invoke("[CIE OSP] FID=0x00 SF FIO batch TX failed: "
+                                    + _ft4222.LastError.Replace("\r\n", " / "));
+                            }
+
+                            if (lblFT4222Status != null)
+                            {
+                                lblFT4222Status.Text = okBatch && okIlas
+                                    ? string.Format("● FID 0x00 SF FIO/ILAS batch TX complete ({0}개)", fioNodes.Count)
+                                    : "FT4222 OSP TX 실패 (FID=0x00 SF FIO/ILAS batch)";
+                                lblFT4222Status.ForeColor = okBatch && okIlas ? Color.Yellow : Color.OrangeRed;
+                            }
+                        }
                     }
                     return;
                 }
 
                 string ifLabel = string.Format("FID 0x{0:X2}", id);
-
-                // ── SlaveFlag 비트마스크 수집 ──
-                CheckBox[] allSF = GetSlaveFlagBoxes();
-                int sfCount = Math.Min(LED_COUNT, allSF.Length);
                 bool rgbwMode = chkRGBWShift.Checked;
+                bool hasFioPath = IsOspTxEnabled() && IsFioTarget(id);
+                bool hasIlasPath = IsIlasTxEnabled() && IsIlasTarget(id);
 
-                // 활성화된 SF 노드 목록 (1-based OSP 주소)
-                var activeNodes = new System.Collections.Generic.List<int>();
-                for (int i = 0; i < sfCount; i++)
-                    if (allSF[i].Checked)
-                        activeNodes.Add(i + 1);  // OSP 주소: 1 = 첫 번째 LED
-
-                if (activeNodes.Count == 0)
+                if (!hasFioPath && !hasIlasPath)
                 {
-                    // [수정] 비활성 노드에 OFF를 보내지 않고 이전 값 유지
-                    OspMessage?.Invoke("[CIE OSP] SlaveFlag 활성 없음 → 전송 건너뜀");
+                    OspMessage?.Invoke(string.Format("[CIE OSP] FID=0x{0:X2} 활성 FIO/ILAS 없음 → 전송 건너뜀", id));
                     return;
                 }
 
@@ -2158,62 +3004,44 @@ namespace LINMaster.Forms
                 {
                     byte level = (byte)Math.Max(0, Math.Min(255, (int)nudBrightness.Value));
                     int shiftOffset = chkRGBWShift.Checked ? _rgbwShiftOffset : 0;
+                    bool anySent = false;
+                    bool anyFail = false;
 
-                    OspMessage?.Invoke(string.Format(
-                        "[CIE OSP] FID=0x{0:X2} ({1}) {2} TX ({3} nodes, level={4}, shift={5})",
-                        id, ifLabel, "RGBW_Shift",
-                        activeNodes.Count, level, shiftOffset));
-
-                    var nodes = new ushort[activeNodes.Count];
-                    var reds = new byte[activeNodes.Count];
-                    var greens = new byte[activeNodes.Count];
-                    var blues = new byte[activeNodes.Count];
-
-                    for (int i = 0; i < activeNodes.Count; i++)
+                    if (hasFioPath)
                     {
-                        int nodeAddr = activeNodes[i];
-                        byte r = 0, g = 0, b = 0;
-                        switch ((nodeAddr - 1 + shiftOffset) % 4)
+                        var fioNodes = GetFioActiveNodesFromSlaveFlags();
+                        if (fioNodes.Count > 0)
                         {
-                            case 0: r = level; break;
-                            case 1: g = level; break;
-                            case 2: b = level; break;
-                            default: r = g = b = level; break;
+                            bool okFio = SendRgbwNodesForPath(id, fioNodes, level, shiftOffset, OspLedPath.FioOnly, "FIO SF");
+                            anySent |= okFio;
+                            anyFail |= !okFio;
                         }
-
-                        nodes[i] = (ushort)nodeAddr;
-                        reds[i] = r;
-                        greens[i] = g;
-                        blues[i] = b;
                     }
 
-                    // 노드별 RGB를 네이티브에 한 번에 전달하고 마지막에 한 번만 flush한다.
-                    bool okBatch = _ft4222.SetColorRgbByNodes(
-                        id, nodes, reds, greens, blues, activeNodes.Count);
-
-                    if (!okBatch)
+                    if (hasIlasPath)
                     {
-                        OspMessage?.Invoke(string.Format(
-                            "[CIE OSP] RGBW batch TX failed: {0}",
-                            _ft4222.LastError.Replace("\r\n", " / ")));
+                        int ilasCount = GetIlasLedCountForTarget(id);
+                        var ilasNodes = ilasCount > 0 ? BuildNodeRange(1, ilasCount) : new System.Collections.Generic.List<int>();
+                        if (ilasNodes.Count > 0)
+                        {
+                            bool okIlas = SendRgbwNodesForPath(id, ilasNodes, level, shiftOffset, OspLedPath.IlasOnly, "ILAS");
+                            anySent |= okIlas;
+                            anyFail |= !okIlas;
+                        }
                     }
-                    else
-                    {
-                        for (int i = 0; i < activeNodes.Count; i++)
-                            RememberNodeRgb(activeNodes[i], new LedRgb(reds[i], greens[i], blues[i]));
 
-                        OspMessage?.Invoke(string.Format(
-                            "[CIE OSP] FID=0x{0:X2} ({1}) {2} batch TX complete ({3} nodes)",
-                            id, ifLabel, "RGBW_Shift",
-                            activeNodes.Count));
+                    if (!anySent && !anyFail)
+                    {
+                        OspMessage?.Invoke("[CIE OSP] SlaveFlag/ILAS 활성 노드 없음 → 전송 건너뜀");
+                        return;
                     }
 
                     if (lblFT4222Status != null)
                     {
-                        lblFT4222Status.Text = okBatch
-                            ? string.Format("● FID 0x{0:X2} RGBW batch TX complete", id)
-                            : string.Format("FT4222 OSP TX 실패 (FID=0x{0:X2} RGBW)", id);
-                        lblFT4222Status.ForeColor = okBatch ? Color.Yellow : Color.OrangeRed;
+                        lblFT4222Status.Text = anyFail
+                            ? string.Format("FT4222 OSP TX 실패 (FID=0x{0:X2} RGBW split)", id)
+                            : string.Format("● FID 0x{0:X2} RGBW split TX complete", id);
+                        lblFT4222Status.ForeColor = anyFail ? Color.OrangeRed : Color.Yellow;
                     }
 
                     if (chkRGBWShift.Checked && advanceRgbwShift)
@@ -2222,68 +3050,57 @@ namespace LINMaster.Forms
                     return;
                 }
 
-                // 모든 노드가 선택된 경우 broadcast 로 한 번에 전송 (효율)
-                bool allSelected = (activeNodes.Count == sfCount && sfCount == allSF.Length);
-                if (allSelected)
+                LedRgb splitTargetRgb = CieToLedRgb(cx, cy, brightness);
+                bool sentAnyPath = false;
+                bool failedAnyPath = false;
+
+                if (hasFioPath)
                 {
-                    OspMessage?.Invoke(string.Format(
-                        "[CIE OSP] FID=0x{0:X2} ({1}) broadcast (전체 {2}개)  x={3:F4} y={4:F4} bri={5:F3}",
-                        id, ifLabel, sfCount, cx, cy, brightness));
-                    bool ok = _ft4222.SetColorCIEByFid(id, cx, cy, brightness);
-                    if (ok)
+                    var fioNodes = GetFioActiveNodesFromSlaveFlags();
+                    if (fioNodes.Count > 0)
                     {
-                        LedRgb targetRgb = CieToLedRgb(cx, cy, brightness);
-                        foreach (int nodeAddr in activeNodes)
-                            RememberNodeRgb(nodeAddr, targetRgb);
-                    }
-                    OspMessage?.Invoke(ok
-                        ? string.Format("[CIE OSP] broadcast TX complete (FID=0x{0:X2})", id)
-                        : string.Format("[CIE OSP] broadcast TX failed: {0}", _ft4222.LastError.Replace("\r\n", " / ")));
-                    if (!ok && lblFT4222Status != null)
-                    {
-                        lblFT4222Status.Text = string.Format("FT4222 OSP TX 실패 (FID=0x{0:X2} broadcast)", id);
-                        lblFT4222Status.ForeColor = Color.OrangeRed;
-                    }
-                }
-                else
-                {
-                    // 선택된 노드만 unicast 로 개별 전송
-                    OspMessage?.Invoke(string.Format(
-                        "[CIE OSP] FID=0x{0:X2} ({1}) unicast {2}개 노드  x={3:F4} y={4:F4} bri={5:F3}",
-                        id, ifLabel, activeNodes.Count, cx, cy, brightness));
+                        OspMessage?.Invoke(string.Format(
+                            "[CIE OSP] FID=0x{0:X2} ({1}) FIO SF batch {2}개 노드  x={3:F4} y={4:F4} bri={5:F3}",
+                            id, ifLabel, fioNodes.Count, cx, cy, brightness));
 
-                    bool anyFail = false;
-                    LedRgb targetRgb = CieToLedRgb(cx, cy, brightness);
-                    foreach (int nodeAddr in activeNodes)
-                    {
-                        bool ok = _ft4222.SetColorCIEByNode(id, (ushort)nodeAddr, cx, cy, brightness);
-                        if (!ok)
-                        {
-                            anyFail = true;
-                            OspMessage?.Invoke(string.Format(
-                                "[CIE OSP] node {0} TX failed: {1}", nodeAddr,
-                                _ft4222.LastError.Replace("\r\n", " / ")));
-                        }
-                        else
-                        {
-                            RememberNodeRgb(nodeAddr, targetRgb);
-                        }
-                    }
-
-                    // [수정] 비활성 노드에 OFF를 보내지 않고 이전 값 유지
-
-                    if (anyFail && lblFT4222Status != null)
-                    {
-                        lblFT4222Status.Text = string.Format("FT4222 OSP TX 실패 (FID=0x{0:X2} unicast)", id);
-                        lblFT4222Status.ForeColor = Color.OrangeRed;
+                        bool okFio = SendFioSolidColorForSelection(id, splitTargetRgb);
+                        sentAnyPath |= okFio;
+                        failedAnyPath |= !okFio;
                     }
                     else
                     {
-                        _ft4222.ReadOspFeedback(id, (ushort)activeNodes[0]);
-                        OspMessage?.Invoke(string.Format(
-                            "[CIE OSP] FID=0x{0:X2} ({1}) unicast TX complete ({2}개 노드)",
-                            id, ifLabel, activeNodes.Count));
+                        OspMessage?.Invoke("[CIE OSP] FIO SlaveFlag 활성 없음 → FIO 전송 건너뜀");
                     }
+                }
+
+                if (hasIlasPath)
+                {
+                    int ilasCount = GetIlasLedCountForTarget(id);
+                    var ilasNodes = ilasCount > 0 ? BuildNodeRange(1, ilasCount) : new System.Collections.Generic.List<int>();
+                    if (ilasNodes.Count > 0)
+                    {
+                        OspMessage?.Invoke(string.Format(
+                            "[CIE OSP] FID=0x{0:X2} ({1}) ILAS batch {2}개 노드  x={3:F4} y={4:F4} bri={5:F3}",
+                            id, ifLabel, ilasNodes.Count, cx, cy, brightness));
+
+                        bool okIlas = SendSolidColorNodesForPath(id, ilasNodes, splitTargetRgb, OspLedPath.IlasOnly, "ILAS");
+                        sentAnyPath |= okIlas;
+                        failedAnyPath |= !okIlas;
+                    }
+                }
+
+                if (!sentAnyPath && !failedAnyPath)
+                {
+                    OspMessage?.Invoke("[CIE OSP] 활성 노드 없음 → 전송 건너뜀");
+                    return;
+                }
+
+                if (lblFT4222Status != null)
+                {
+                    lblFT4222Status.Text = failedAnyPath
+                        ? string.Format("FT4222 OSP TX 실패 (FID=0x{0:X2} split)", id)
+                        : string.Format("● FID 0x{0:X2} split TX complete", id);
+                    lblFT4222Status.ForeColor = failedAnyPath ? Color.OrangeRed : Color.Yellow;
                 }
             }
         }
@@ -2493,3 +3310,6 @@ namespace LINMaster.Forms
         }
     }
 }
+
+
+

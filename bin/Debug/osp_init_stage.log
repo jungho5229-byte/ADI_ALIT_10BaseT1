@@ -1,0 +1,6 @@
+InitFixed: before InitSystem
+InitFixed: after InitSystem / before CreateE2bAppFixed
+FioOspDeviceInit: enter
+FioOspDeviceInit: before MarkDiscoveredFids
+FioOspDeviceInit: after MarkDiscoveredFids
+InitFixed: after CreateE2bAppFixed

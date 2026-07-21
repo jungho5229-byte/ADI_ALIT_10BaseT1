@@ -130,6 +130,10 @@
   </ItemGroup>
   <ItemGroup>
     <Content Include="hatbit-logo.ico" />
+    <Content Include="NativeOsp\ilas_led.c" />
+    <Content Include="NativeOsp\ilas_led.h" />
+    <Content Include="NativeOsp\utils\iseled.c" />
+    <Content Include="NativeOsp\utils\iseled.h" />
   </ItemGroup>
   <!-- ================================================================
        NativeOsp / OspBridge.dll 자동 빌드
@@ -144,12 +148,12 @@
   <!-- Step 2: cmake configure (항상 실행) -->
   <Target Name="ConfigureOspBridge" BeforeTargets="BuildOspBridge">
     <Message Text="[NativeOsp] cmake configure..." Importance="high" />
-    <Exec Command="cmake -S &quot;$(MSBuildProjectDirectory)\NativeOsp&quot; -B &quot;$(MSBuildProjectDirectory)\NativeOsp\cmake-build&quot; -G Ninja" WorkingDirectory="$(MSBuildProjectDirectory)\NativeOsp\cmake-build" />
+    <Exec Command="set PATH=C:\mingw64\bin;%PATH% &amp;&amp; cmake -S &quot;$(MSBuildProjectDirectory)\NativeOsp&quot; -B &quot;$(MSBuildProjectDirectory)\NativeOsp\cmake-build&quot; -G Ninja -DCMAKE_C_COMPILER=&quot;C:\mingw64\bin\gcc.exe&quot; -DCMAKE_MAKE_PROGRAM=&quot;C:\iar\ewarm-9.70.4\common\bin\ninja.exe&quot;" WorkingDirectory="$(MSBuildProjectDirectory)\NativeOsp\cmake-build" />
   </Target>
   <!-- Step 3: cmake build -->
   <Target Name="BuildOspBridge" BeforeTargets="BeforeBuild">
     <Message Text="[NativeOsp] cmake build..." Importance="high" />
-    <Exec Command="cmake --build &quot;$(MSBuildProjectDirectory)\NativeOsp\cmake-build&quot;" WorkingDirectory="$(MSBuildProjectDirectory)\NativeOsp\cmake-build" />
+    <Exec Command="set PATH=C:\mingw64\bin;%PATH% &amp;&amp; cmake --build &quot;$(MSBuildProjectDirectory)\NativeOsp\cmake-build&quot;" WorkingDirectory="$(MSBuildProjectDirectory)\NativeOsp\cmake-build" />
   </Target>
   <!-- Step 4: OspBridge.dll → bin 출력 폴더로 복사 -->
   <Target Name="CopyOspBridge" AfterTargets="Build" Condition="Exists('$(MSBuildProjectDirectory)\NativeOsp\build\OspBridge.dll')">

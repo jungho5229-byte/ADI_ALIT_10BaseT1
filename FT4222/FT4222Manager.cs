@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Runtime.InteropServices;
 using System.Collections.Generic;
 using System.IO;
@@ -133,6 +133,26 @@ namespace LINMaster.FT4222
             [In] byte[] greens,
             [In] byte[] blues,
             ushort count);
+        [DllImport(OSP_BRIDGE, CallingConvention = CallingConvention.StdCall, EntryPoint = "OspBridge_SetFioColorRgbByNodes")]
+        private static extern int OspBridge_SetFioColorRgbByNodes_Native(
+            byte fid,
+            [In] ushort[] nodeAddrs,
+            [In] byte[] reds,
+            [In] byte[] greens,
+            [In] byte[] blues,
+            ushort count);
+
+        [DllImport(OSP_BRIDGE, CallingConvention = CallingConvention.StdCall, EntryPoint = "OspBridge_SetIlasColorRgbByNodes")]
+        private static extern int OspBridge_SetIlasColorRgbByNodes_Native(
+            byte fid,
+            [In] ushort[] nodeAddrs,
+            [In] byte[] reds,
+            [In] byte[] greens,
+            [In] byte[] blues,
+            ushort count);
+
+        [DllImport(OSP_BRIDGE, CallingConvention = CallingConvention.StdCall, EntryPoint = "OspBridge_GetIlasLedCount")]
+        private static extern ushort OspBridge_GetIlasLedCount_Native();
 
         [DllImport(OSP_BRIDGE, CallingConvention = CallingConvention.StdCall)]
         private static extern int OspBridge_Readback(out ushort rPwm, out ushort gPwm, out ushort bPwm, out double temperature);
@@ -140,6 +160,10 @@ namespace LINMaster.FT4222
         [DllImport(OSP_BRIDGE, CallingConvention = CallingConvention.StdCall, EntryPoint = "OspBridge_ReadbackByFid")]
         private static extern int OspBridge_ReadbackByFid_Native(byte fid, ushort nodeAddr,
             out ushort rPwm, out ushort gPwm, out ushort bPwm, out double temperature);
+
+        [DllImport(OSP_BRIDGE, CallingConvention = CallingConvention.StdCall, EntryPoint = "OspBridge_ReadIlasTempByFid")]
+        private static extern int OspBridge_ReadIlasTempByFid_Native(byte fid, byte nodeAddr,
+            out byte data0, out byte data1, out byte data2, out ushort validResp, out ushort expectedResp);
 
         [DllImport(OSP_BRIDGE, CallingConvention = CallingConvention.StdCall)]
         private static extern void OspBridge_Close();
@@ -175,7 +199,33 @@ namespace LINMaster.FT4222
         private static extern int OspBridge_SetNodeId(byte nodeId);
 
         [DllImport(OSP_BRIDGE, CallingConvention = CallingConvention.StdCall)]
+        private static extern int OspBridge_ApplyMacNodeNoReinit([In] byte[] mac6, byte nodeId);
+
+        [DllImport(OSP_BRIDGE, CallingConvention = CallingConvention.StdCall)]
+        private static extern int OspBridge_ApplyFidOffsetNoReinit(byte offset);
+
+        [DllImport(OSP_BRIDGE, CallingConvention = CallingConvention.StdCall)]
+        private static extern int OspBridge_ApplyMacNodeMapNoReinit(
+            [In] byte[] oldFids,
+            [In] byte[] mac6List,
+            [In] byte[] nodeIds,
+            byte count);
+
+        [DllImport(OSP_BRIDGE, CallingConvention = CallingConvention.StdCall)]
         private static extern int OspBridge_ProgramMacNodeOtp([In] byte[] mac6, byte nodeId);
+
+        [DllImport(OSP_BRIDGE, CallingConvention = CallingConvention.StdCall)]
+        private static extern int OspBridge_ReadMacNodeOtp(
+            [Out] byte[] mac6, out byte nodeId,
+            out byte bootStatusMac, out byte bootStatusPlca,
+            [Out] byte[] rawDesigner);
+
+        [DllImport(OSP_BRIDGE, CallingConvention = CallingConvention.StdCall)]
+        private static extern int OspBridge_ReadMacNodeOtpByFid(
+            byte accessFid,
+            [Out] byte[] mac6, out byte nodeId,
+            out byte bootStatusMac, out byte bootStatusPlca,
+            [Out] byte[] rawDesigner);
 
         [DllImport(FTD2XX)] private static extern FT_STATUS FT_CreateDeviceInfoList(out uint numDevs);
         [DllImport(FTD2XX)]
@@ -420,6 +470,42 @@ namespace LINMaster.FT4222
         public const ulong CONTROLLER_MAC = 0x00E022FE70F0UL;
         private const ulong FIXED_REMOTE_MAC = 0x00E022FE7000UL;
         public bool UseOtpMacMode { get; set; }
+        public bool TxRxFeedbackEnabled { get; set; } = false;
+        private DateTime _lastFioRxFeedbackUtc = DateTime.MinValue;
+        private DateTime _lastIlasRxFeedbackUtc = DateTime.MinValue;
+        private const int TX_RX_FEEDBACK_MIN_INTERVAL_MS = 200;
+
+        private void ResetNativeTraceLogs()
+        {
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            string projectDir = Path.GetFullPath(Path.Combine(baseDir, @"..\..\"));
+            string[] paths =
+            {
+                Path.Combine(projectDir, "osp_spi_trace.log"),
+                Path.Combine(projectDir, "osp_init_stage.log"),
+                Path.Combine(baseDir, "osp_spi_trace.log"),
+                Path.Combine(baseDir, "osp_init_stage.log"),
+                Path.Combine(Environment.CurrentDirectory, "osp_spi_trace.log"),
+                Path.Combine(Environment.CurrentDirectory, "osp_init_stage.log"),
+                Path.Combine(Path.GetTempPath(), "ospbridge_trace_debug.txt")
+            };
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string path in paths)
+            {
+                if (string.IsNullOrWhiteSpace(path) || !seen.Add(path))
+                    continue;
+
+                try
+                {
+                    File.WriteAllText(path, string.Empty);
+                }
+                catch
+                {
+                    // Trace files are diagnostic only; connection must continue even if one is locked.
+                }
+            }
+        }
 
         /// <summary>
         /// [연결 전략] OspBridge_InitFixed() 한 번으로 모든 케이스 처리
@@ -434,23 +520,14 @@ namespace LINMaster.FT4222
                 OspLog?.Invoke("[FT4222] Connect mode = OTP MAC/Node");
             else
                 OspLog?.Invoke("[FT4222] Connect mode = IF/FID input");
+            ResetNativeTraceLogs();
             // OspBridge_InitFixed() 내부(CreateE2bAppFixed)에서:
             //   고정 MAC(..00)으로 setRemotePlcaId → setPlcaEn → startDiscovery
             //   콜백: 실제 수신 MAC으로 ganRemoteMacAddrMap 갱신 + writeMacAddr
             //   실제 MAC ≠ 고정 MAC 이면 실제 MAC 기준 setRemotePlcaId 재설정
             // → InitFixed 성공 시점에 실제 MAC(기본이든 HW 변경이든)으로 연결 완료.
             OspLog?.Invoke("[FT4222] OspBridge_InitFixed 시도...");
-            int stFixed = UseOtpMacMode ? OspBridge_InitOtp() : OspBridge_InitFixed();
-            if (UseOtpMacMode)
-            {
-                if (stFixed != 0)
-                {
-                    LastError = "OspBridge_InitOtp failed: " + stFixed + "\r\n" + GetNativeBridgeError();
-                    OspLog?.Invoke("[FT4222] " + LastError.Replace("\r\n", " / "));
-                    return false;
-                }
-                OspLog?.Invoke("[FT4222] OspBridge_InitOtp success");
-            }
+            int stFixed = OspBridge_InitFixed();
             if (stFixed != 0)
             {
                 LastError = "OspBridge_InitFixed 실패: " + stFixed + "\r\n" + GetNativeBridgeError();
@@ -460,6 +537,9 @@ namespace LINMaster.FT4222
             OspLog?.Invoke("[FT4222] OspBridge_InitFixed 성공");
 
             // AD3304 연결 상태 + FIO 활성 상태 출력 (C DLL 요약 문자열)
+            if (UseOtpMacMode && !ApplyOtpMacNodeAfterInit())
+                return false;
+
             string ad3304Status = GetAd3304Status();
             OspLog?.Invoke("[AD3304] === 연결/FIO 상태 ===");
             foreach (var line in ad3304Status.Split('\n'))
@@ -469,46 +549,6 @@ namespace LINMaster.FT4222
             }
 
             // FIO 초기화 결과와 FID별 상태 요약은 연결 확인용으로 유지한다.
-            try
-            {
-                IntPtr dp = OspBridge_GetFioDiag_Native();
-                string diag = dp == IntPtr.Zero ? "(null)" : Marshal.PtrToStringAnsi(dp);
-                OspLog?.Invoke("[DIAG] FIO Init result: " + diag);
-
-                if (!string.IsNullOrWhiteSpace(diag))
-                {
-                    var parts = diag.Split('|');
-                    if (parts.Length > 0)
-                    {
-                        OspLog?.Invoke("[DIAG] FIO0: " + parts[0]);
-                        bool fio0Ok = IsFioDiagOk(parts[0]);
-                        OspLog?.Invoke(string.Format(
-                            "[DIAG] FIO0 connection: {0} (IF0/IF1)",
-                            fio0Ok ? "OK" : "FAIL"));
-                    }
-                }
-
-                try
-                {
-                    IntPtr dp2 = OspBridge_GetFioDiagAll_Native();
-                    string diagAll = dp2 == IntPtr.Zero ? string.Empty : Marshal.PtrToStringAnsi(dp2);
-                    OspLog?.Invoke("[DIAG] FID별 FIO 상태:");
-                    foreach (var seg in diagAll.Split('|'))
-                    {
-                        if (!string.IsNullOrWhiteSpace(seg))
-                            OspLog?.Invoke("  " + seg.Trim());
-                    }
-                }
-                catch (EntryPointNotFoundException)
-                {
-                    OspLog?.Invoke("[DIAG] OspBridge_GetFioDiagAll 미지원 - DLL 리빌드 필요");
-                }
-            }
-            catch (EntryPointNotFoundException)
-            {
-                OspLog?.Invoke("[DIAG] OspBridge_GetFioDiag 미지원 - DLL 리빌드 필요");
-            }
-
             // 실제 MAC 읽어서 로그/저장 (연결은 이미 완료된 상태)
             byte[] macBuf = new byte[6];
             byte nodeId;
@@ -532,6 +572,276 @@ namespace LINMaster.FT4222
         }
 
         /// <summary>Init 성공 직후: GetMacNode로 실제 MAC을 읽어 ini에 저장합니다.</summary>
+        private bool ApplyOtpMacNodeAfterInit()
+        {
+            List<byte> activeFids = GetActiveFids();
+            if (activeFids.Count > 0)
+                return ApplyOtpMacNodeMapAfterInit(activeFids);
+
+            if (!ReadMacNodeOtpNative(out ulong otpMac, out byte otpNode,
+                    out byte bootMac, out byte bootPlca))
+                return false;
+
+            if (otpMac == 0 || otpNode == 0 || otpNode > 254)
+            {
+                LastError = string.Format("OTP MAC/Node is empty or invalid: MAC={0:X12}, Node={1}", otpMac, otpNode);
+                OspLog?.Invoke("[OTP ERR] " + LastError);
+                return false;
+            }
+
+            byte macFid = (byte)(otpMac & 0xFF);
+            if (macFid != otpNode)
+            {
+                LastError = string.Format("OTP MAC last byte and Node mismatch: MAC={0:X12}, Node={1}", otpMac, otpNode);
+                OspLog?.Invoke("[OTP ERR] " + LastError);
+                return false;
+            }
+
+            if (bootMac == 0 || bootPlca == 0)
+            {
+                OspLog?.Invoke(string.Format(
+                    "[OTP WARN] bootStatus(MAC/PLCA)={0}/{1}. OTP value will still be applied.",
+                    bootMac, bootPlca));
+            }
+
+            OspLog?.Invoke(string.Format("[OTP] Applying OTP MAC/Node to active network: MAC={0:X12} Node={1}",
+                otpMac, otpNode));
+
+            if (!ApplyMacNodeNoReinitNative(otpMac, otpNode))
+                return false;
+
+            SaveSettings(otpMac, otpNode);
+            OspLog?.Invoke(string.Format("[OTP] Active MAC/Node now uses OTP value: MAC={0:X12} Node={1}",
+                otpMac, otpNode));
+            return true;
+        }
+
+        private bool ApplyOtpMacNodeMapAfterInit(List<byte> activeFids)
+        {
+            List<ulong> otpMacs = new List<ulong>();
+            List<byte> otpNodes = new List<byte>();
+            HashSet<byte> targetFids = new HashSet<byte>();
+
+            OspLog?.Invoke(string.Format("[OTP] Reading OTP MAC/Node for {0} active FID(s)", activeFids.Count));
+            foreach (byte physicalFid in activeFids)
+            {
+                if (!ReadMacNodeOtpByFidNative(physicalFid, out ulong otpMac, out byte otpNode,
+                        out byte bootMac, out byte bootPlca))
+                    return false;
+
+                if (otpMac == 0 || otpNode == 0 || otpNode > 8)
+                {
+                    LastError = string.Format("OTP MAC/Node is empty or invalid at physical FID 0x{0:X2}: MAC={1:X12}, Node={2}",
+                        physicalFid, otpMac, otpNode);
+                    OspLog?.Invoke("[OTP ERR] " + LastError);
+                    return false;
+                }
+
+                byte otpFid = (byte)(otpMac & 0xFF);
+                if (otpFid != otpNode || otpFid < 1 || otpFid > 8)
+                {
+                    LastError = string.Format("OTP MAC last byte and Node mismatch at physical FID 0x{0:X2}: MAC={1:X12}, Node={2}",
+                        physicalFid, otpMac, otpNode);
+                    OspLog?.Invoke("[OTP ERR] " + LastError);
+                    return false;
+                }
+
+                if (!targetFids.Add(otpFid))
+                {
+                    LastError = string.Format("Duplicate OTP target FID 0x{0:X2}", otpFid);
+                    OspLog?.Invoke("[OTP ERR] " + LastError);
+                    return false;
+                }
+
+                if (bootMac == 0 || bootPlca == 0)
+                {
+                    OspLog?.Invoke(string.Format(
+                        "[OTP WARN] Physical FID 0x{0:X2}: bootStatus(MAC/PLCA)={1}/{2}. OTP value will still be applied.",
+                        physicalFid, bootMac, bootPlca));
+                }
+
+                OspLog?.Invoke(string.Format("[OTP] Physical FID 0x{0:X2} -> OTP MAC={1:X12} Node={2}",
+                    physicalFid, otpMac, otpNode));
+                otpMacs.Add(otpMac);
+                otpNodes.Add(otpNode);
+            }
+
+            if (!ApplyMacNodeMapNoReinitNative(activeFids, otpMacs, otpNodes))
+                return false;
+
+            if (otpMacs.Count > 0)
+                SaveSettings(otpMacs[0], otpNodes[0]);
+
+            OspLog?.Invoke("[OTP] Active FIDs now use each node's OTP MAC/Node map");
+            return true;
+        }
+
+        private bool ApplyFidOffsetNoReinitNative(byte offset, int activeCount)
+        {
+            OspLog?.Invoke(string.Format("[OTP] Applying multi-node FID offset +{0} to {1} active nodes", offset, activeCount));
+            int st = OspBridge_ApplyFidOffsetNoReinit(offset);
+            if (st != 0)
+            {
+                LastError = "OspBridge_ApplyFidOffsetNoReinit failed: " + st + "\r\n" + GetNativeBridgeError();
+                OspLog?.Invoke("[OSP ERR] " + LastError.Replace("\r\n", " / "));
+                return false;
+            }
+            OspLog?.Invoke(string.Format("[OTP] Active FIDs remapped by +{0}", offset));
+            return true;
+        }
+
+        private bool ReadMacNodeOtpByFidNative(byte physicalFid, out ulong mac, out byte nodeId,
+            out byte bootStatusMac, out byte bootStatusPlca)
+        {
+            mac = 0;
+            nodeId = 0;
+            bootStatusMac = 0;
+            bootStatusPlca = 0;
+
+            byte[] buf = new byte[6];
+            byte[] raw = new byte[8 * 16];
+            int st = OspBridge_ReadMacNodeOtpByFid(physicalFid, buf, out nodeId,
+                out bootStatusMac, out bootStatusPlca, raw);
+            if (st != 0)
+            {
+                LastError = string.Format("OspBridge_ReadMacNodeOtpByFid(FID=0x{0:X2}) failed: {1}\r\n{2}",
+                    physicalFid, st, GetNativeBridgeError());
+                OspLog?.Invoke("[OTP ERR] " + LastError.Replace("\r\n", " / "));
+                return false;
+            }
+
+            mac = ((ulong)buf[0] << 40)
+                | ((ulong)buf[1] << 32)
+                | ((ulong)buf[2] << 24)
+                | ((ulong)buf[3] << 16)
+                | ((ulong)buf[4] << 8)
+                | (ulong)buf[5];
+
+            return true;
+        }
+
+        private bool ReadMacNodeOtpNative(out ulong mac, out byte nodeId,
+            out byte bootStatusMac, out byte bootStatusPlca)
+        {
+            mac = 0;
+            nodeId = 0;
+            bootStatusMac = 0;
+            bootStatusPlca = 0;
+
+            byte[] buf = new byte[6];
+            byte[] raw = new byte[8 * 16];
+            int st = OspBridge_ReadMacNodeOtp(buf, out nodeId,
+                out bootStatusMac, out bootStatusPlca, raw);
+            if (st != 0)
+            {
+                LastError = "OspBridge_ReadMacNodeOtp failed: " + st + "\r\n" + GetNativeBridgeError();
+                OspLog?.Invoke("[OTP ERR] " + LastError.Replace("\r\n", " / "));
+                return false;
+            }
+
+            mac = ((ulong)buf[0] << 40)
+                | ((ulong)buf[1] << 32)
+                | ((ulong)buf[2] << 24)
+                | ((ulong)buf[3] << 16)
+                | ((ulong)buf[4] << 8)
+                | (ulong)buf[5];
+
+            OspLog?.Invoke(string.Format(
+                "[OTP] ReadMacNodeOtp: MAC={0:X12} Node={1} bootStatus(MAC/PLCA)={2}/{3}",
+                mac, nodeId, bootStatusMac, bootStatusPlca));
+            return true;
+        }
+
+        private bool WriteMacNative(ulong mac)
+        {
+            byte[] buf = Mac64To8(mac);
+            int st = OspBridge_SetMac(buf);
+            if (st != 0)
+            {
+                LastError = "OspBridge_SetMac failed: " + st + "\r\n" + GetNativeBridgeError();
+                OspLog?.Invoke("[OSP ERR] " + LastError.Replace("\r\n", " / "));
+                return false;
+            }
+            return true;
+        }
+
+        private bool WriteNodeIdNative(byte nodeId)
+        {
+            int st = OspBridge_SetNodeId(nodeId);
+            if (st != 0)
+            {
+                LastError = "OspBridge_SetNodeId failed: " + st + "\r\n" + GetNativeBridgeError();
+                OspLog?.Invoke("[OSP ERR] " + LastError.Replace("\r\n", " / "));
+                return false;
+            }
+            return true;
+        }
+
+        private bool ApplyMacNodeNoReinitNative(ulong mac, byte nodeId)
+        {
+            byte[] buf = Mac64To8(mac);
+            int st = OspBridge_ApplyMacNodeNoReinit(buf, nodeId);
+            if (st != 0)
+            {
+                LastError = "OspBridge_ApplyMacNodeNoReinit failed: " + st + "\r\n" + GetNativeBridgeError();
+                OspLog?.Invoke("[OSP ERR] " + LastError.Replace("\r\n", " / "));
+                return false;
+            }
+            return true;
+        }
+
+        private bool ApplyMacNodeMapNoReinitNative(List<byte> physicalFids, List<ulong> otpMacs, List<byte> otpNodes)
+        {
+            if (physicalFids == null || otpMacs == null || otpNodes == null ||
+                physicalFids.Count == 0 || physicalFids.Count != otpMacs.Count || physicalFids.Count != otpNodes.Count)
+            {
+                LastError = "Invalid OTP MAC/Node map";
+                OspLog?.Invoke("[OTP ERR] " + LastError);
+                return false;
+            }
+
+            byte[] oldFids = physicalFids.ToArray();
+            byte[] macList = new byte[otpMacs.Count * 6];
+            byte[] nodeIds = otpNodes.ToArray();
+            for (int i = 0; i < otpMacs.Count; i++)
+            {
+                byte[] mac6 = Mac64To8(otpMacs[i]);
+                Buffer.BlockCopy(mac6, 0, macList, i * 6, 6);
+            }
+
+            OspLog?.Invoke("[OTP] Applying per-FID OTP MAC/Node map to active network");
+            int st = OspBridge_ApplyMacNodeMapNoReinit(oldFids, macList, nodeIds, (byte)physicalFids.Count);
+            if (st != 0)
+            {
+                LastError = "OspBridge_ApplyMacNodeMapNoReinit failed: " + st + "\r\n" + GetNativeBridgeError();
+                OspLog?.Invoke("[OSP ERR] " + LastError.Replace("\r\n", " / "));
+                return false;
+            }
+            LogOtpIlasAliasTrace();
+            return true;
+        }
+
+        private void LogOtpIlasAliasTrace()
+        {
+            try
+            {
+                IntPtr p = OspBridge_GetFioTrace_Native();
+                string trace = p == IntPtr.Zero ? string.Empty : Marshal.PtrToStringAnsi(p);
+                if (string.IsNullOrWhiteSpace(trace))
+                    return;
+
+                foreach (string line in trace.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    if (line.Contains("ILAS OTP alias"))
+                        OspLog?.Invoke("[OTP] " + line.Trim());
+                }
+            }
+            catch
+            {
+                // Diagnostic only.
+            }
+        }
+
         private void AfterInitSuccess()
         {
             try
@@ -766,7 +1076,7 @@ namespace LINMaster.FT4222
                 int bridgeStatus = OspBridge_SetColorRgb(r, g, b);
                 if (bridgeStatus == 0)
                 {
-                    ReadOspFeedback();
+                    LogFirstLedFeedbackAfterTx(0x00, readFio: true, readIlas: false);
                     return true;
                 }
 
@@ -816,7 +1126,7 @@ namespace LINMaster.FT4222
                 int stFid = OspBridge_SetColorRgbByFid_Native(fid, r, g, b);
                 if (stFid == 0)
                 {
-                    //ReadOspFeedback(fid, 1); 
+                    LogFirstLedFeedbackAfterTx(fid, readFio: true, readIlas: true);
                     return true;
                 }
                 LastError = string.Format("OspBridge_SetColorRgbByFid(FID=0x{0:X2}) 실패: {1}", fid, stFid)
@@ -832,7 +1142,7 @@ namespace LINMaster.FT4222
                 int st = OspBridge_SetColorRgb(r, g, b);
                 if (st == 0)
                 {
-                    //ReadOspFeedback(fid, 1); 
+                    LogFirstLedFeedbackAfterTx(fid, readFio: true, readIlas: true);
                     return true;
                 }
                 LastError = "OspBridge_SetColorRgb(폴백) 실패: " + st + "\r\n" + GetNativeBridgeError();
@@ -919,7 +1229,11 @@ namespace LINMaster.FT4222
                 try
                 {
                     int st = OspBridge_SetColorRgbByNodes_Native(fid, nodeAddrs, reds, greens, blues, (ushort)count);
-                    if (st == 0) return true;
+                    if (st == 0)
+                    {
+                        LogFirstLedFeedbackAfterTx(fid, readFio: true, readIlas: true);
+                        return true;
+                    }
 
                     LastError = string.Format("OspBridge_SetColorRgbByNodes(FID=0x{0:X2}, count={1}) failed: {2}",
                                   fid, count, st)
@@ -947,6 +1261,65 @@ namespace LINMaster.FT4222
             return ok;
         }
 
+        public bool SetFioColorRgbByNodes(byte fid, ushort[] nodeAddrs, byte[] reds, byte[] greens, byte[] blues, int count)
+        {
+            return SetSplitColorRgbByNodes(fid, nodeAddrs, reds, greens, blues, count, true);
+        }
+
+        public bool SetIlasColorRgbByNodes(byte fid, ushort[] nodeAddrs, byte[] reds, byte[] greens, byte[] blues, int count)
+        {
+            return SetSplitColorRgbByNodes(fid, nodeAddrs, reds, greens, blues, count, false);
+        }
+
+        private bool SetSplitColorRgbByNodes(byte fid, ushort[] nodeAddrs, byte[] reds, byte[] greens, byte[] blues, int count, bool fioOnly)
+        {
+            if (!IsConnected) return false;
+            if (nodeAddrs == null || reds == null || greens == null || blues == null)
+            {
+                LastError = fioOnly ? "SetFioColorRgbByNodes null buffer" : "SetIlasColorRgbByNodes null buffer";
+                return false;
+            }
+            if (count <= 0) return true;
+            if (count > nodeAddrs.Length || count > reds.Length || count > greens.Length || count > blues.Length)
+            {
+                LastError = fioOnly ? "SetFioColorRgbByNodes count exceeds buffer length" : "SetIlasColorRgbByNodes count exceeds buffer length";
+                return false;
+            }
+            if (count > ushort.MaxValue)
+            {
+                LastError = fioOnly ? "SetFioColorRgbByNodes count too large" : "SetIlasColorRgbByNodes count too large";
+                return false;
+            }
+            if (!_nativeOspBridge)
+            {
+                LastError = fioOnly ? "FIO-only native bridge not active" : "ILAS-only native bridge not active";
+                return false;
+            }
+
+            try
+            {
+                int st = fioOnly
+                    ? OspBridge_SetFioColorRgbByNodes_Native(fid, nodeAddrs, reds, greens, blues, (ushort)count)
+                    : OspBridge_SetIlasColorRgbByNodes_Native(fid, nodeAddrs, reds, greens, blues, (ushort)count);
+                if (st == 0)
+                {
+                    LogFirstLedFeedbackAfterTx(fid, readFio: fioOnly, readIlas: !fioOnly);
+                    return true;
+                }
+
+                LastError = string.Format("{0}(FID=0x{1:X2}, count={2}) failed: {3}",
+                              fioOnly ? "OspBridge_SetFioColorRgbByNodes" : "OspBridge_SetIlasColorRgbByNodes",
+                              fid, count, st)
+                          + "\r\n" + GetNativeBridgeError();
+                OspLog?.Invoke("[OSP ERR] " + LastError.Replace("\r\n", " / "));
+                return false;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                LastError = fioOnly ? "OspBridge_SetFioColorRgbByNodes missing" : "OspBridge_SetIlasColorRgbByNodes missing";
+                return false;
+            }
+        }
         public bool SetColorCIEByNode(byte fid, ushort nodeAddr, float cx, float cy, float brightness01)
         {
             if (!IsConnected) return false;
@@ -1043,7 +1416,7 @@ namespace LINMaster.FT4222
             return OspSetPwm(BROADCAST_ADDR, rPwm, gPwm, bPwm, dayMode: false);
         }
 
-        public bool ReadOspFeedback(byte fid = 0x01, ushort nodeAddr = 1)
+        public bool ReadOspFeedback(byte fid = 0x01, ushort nodeAddr = 1, bool logErrors = true)
         {
             if (!IsConnected || !_nativeOspBridge) return false;
 
@@ -1079,8 +1452,99 @@ namespace LINMaster.FT4222
             LastError = string.Format("OspBridge_ReadbackByFid(FID=0x{0:X2}, node={1}) 실패: {2}",
                         fid, nodeAddr, st)
                       + "\r\n" + GetNativeBridgeError();
-            OspLog?.Invoke("[OSP ERR] " + LastError.Replace("\r\n", " / "));
+            if (logErrors)
+                OspLog?.Invoke("[OSP ERR] " + LastError.Replace("\r\n", " / "));
             return false;
+        }
+
+        public bool ReadIlasTempFeedback(byte fid = 0x01, byte nodeAddr = 1)
+        {
+            if (!IsConnected || !_nativeOspBridge) return false;
+            if (fid < 1 || fid > 8 || !IsIlasActiveFid(fid)) return false;
+            if (nodeAddr == 0) nodeAddr = 1;
+
+            try
+            {
+                byte data0;
+                byte data1;
+                byte data2;
+                ushort validResp;
+                ushort expectedResp;
+                int st = OspBridge_ReadIlasTempByFid_Native(fid, nodeAddr,
+                    out data0, out data1, out data2, out validResp, out expectedResp);
+
+                if (st == 0)
+                {
+                    double tempC = DecodeIlasTemperatureC(data0, data1, data2);
+                    OspLog?.Invoke(string.Format(
+                        "[ILAS RX] FID=0x{0:X2} node={1} TEMP={2:F2}C RAW=[{3:X2} {4:X2} {5:X2}] Resp={6}/{7}",
+                        fid, nodeAddr, tempC, data0, data1, data2, validResp, expectedResp));
+                    return true;
+                }
+
+                LastError = string.Format("OspBridge_ReadIlasTempByFid(FID=0x{0:X2}, node={1}) 실패: {2}",
+                            fid, nodeAddr, st)
+                          + "\r\n" + GetNativeBridgeError();
+                OspLog?.Invoke("[ILAS ERR] " + LastError.Replace("\r\n", " / "));
+                return false;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                OspLog?.Invoke("[ILAS ERR] OspBridge_ReadIlasTempByFid 미지원 DLL");
+                return false;
+            }
+        }
+
+        private static double DecodeIlasTemperatureC(byte data0, byte data1, byte data2)
+        {
+            _ = data0;
+            _ = data2;
+            // seddLED3.0 datasheet exposes the ADC/read flow but not the conversion table.
+            // Observed ILAS temp code 0x58 aligns with ambient when interpreted as code - 55.
+            return data1 - 55.0;
+        }
+
+        private void LogFirstLedFeedbackAfterTx(byte fid, bool readFio, bool readIlas)
+        {
+            if (!TxRxFeedbackEnabled)
+                return;
+
+            DateTime now = DateTime.UtcNow;
+
+            if (readFio)
+            {
+                byte fioFid = ResolveFirstActiveFid(fid, wantFio: true);
+                if (fioFid != 0 &&
+                    (now - _lastFioRxFeedbackUtc).TotalMilliseconds >= TX_RX_FEEDBACK_MIN_INTERVAL_MS)
+                {
+                    _lastFioRxFeedbackUtc = now;
+                    ReadOspFeedback(fioFid, 1, logErrors: false);
+                }
+            }
+
+            if (readIlas)
+            {
+                byte ilasFid = ResolveFirstActiveFid(fid, wantFio: false);
+                if (ilasFid != 0 &&
+                    (now - _lastIlasRxFeedbackUtc).TotalMilliseconds >= TX_RX_FEEDBACK_MIN_INTERVAL_MS)
+                {
+                    _lastIlasRxFeedbackUtc = now;
+                    ReadIlasTempFeedback(ilasFid, 1);
+                }
+            }
+        }
+
+        private byte ResolveFirstActiveFid(byte fid, bool wantFio)
+        {
+            if (fid >= 1 && fid <= 8)
+                return wantFio ? (IsFioActiveFid(fid) ? fid : (byte)0) : (IsIlasActiveFid(fid) ? fid : (byte)0);
+
+            for (byte f = 1; f <= 8; f++)
+            {
+                if (wantFio ? IsFioActiveFid(f) : IsIlasActiveFid(f))
+                    return f;
+            }
+            return 0;
         }
 
         public string GetAd3304Status()
@@ -1105,7 +1569,8 @@ namespace LINMaster.FT4222
                 string line = rawLine.Trim();
                 if (!line.StartsWith("FID", StringComparison.OrdinalIgnoreCase) ||
                     line.IndexOf("DISC=OK", StringComparison.OrdinalIgnoreCase) < 0 ||
-                    line.IndexOf("FIO=ACTIVE", StringComparison.OrdinalIgnoreCase) < 0)
+                    (line.IndexOf("FIO=ACTIVE", StringComparison.OrdinalIgnoreCase) < 0 &&
+                     line.IndexOf("ILAS=ACTIVE", StringComparison.OrdinalIgnoreCase) < 0))
                     continue;
 
                 if (line.Length >= 5 && byte.TryParse(line.Substring(3, 2), out byte fid) &&
@@ -1115,6 +1580,50 @@ namespace LINMaster.FT4222
             return result;
         }
 
+        public int GetIlasLedCount()
+        {
+            if (!_nativeOspBridge) return 0;
+            try
+            {
+                int count = OspBridge_GetIlasLedCount_Native();
+                return count < 0 ? 0 : count;
+            }
+            catch { return 0; }
+        }
+
+        public bool IsIlasActiveFid(byte fid)
+        {
+            if (fid < 1 || fid > 8) return false;
+            string status = GetAd3304Status();
+            if (string.IsNullOrWhiteSpace(status)) return false;
+
+            string prefix = string.Format("FID{0:00}:", fid);
+            foreach (string rawLine in status.Split('\n'))
+            {
+                string line = rawLine.Trim();
+                if (line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
+                    line.IndexOf("ILAS=ACTIVE", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+            }
+            return false;
+        }
+
+        public bool IsFioActiveFid(byte fid)
+        {
+            if (fid < 1 || fid > 8) return false;
+            string status = GetAd3304Status();
+            if (string.IsNullOrWhiteSpace(status)) return false;
+
+            string prefix = string.Format("FID{0:00}:", fid);
+            foreach (string rawLine in status.Split('\n'))
+            {
+                string line = rawLine.Trim();
+                if (line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
+                    line.IndexOf("FIO=ACTIVE", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+            }
+            return false;
+        }
         private bool TryGetFirstDiscoveredMac(out ulong mac, out byte nodeId)
         {
             mac = 0;
@@ -1528,6 +2037,53 @@ namespace LINMaster.FT4222
 
             SaveSettings(mac, nodeId);
             OspLog?.Invoke(string.Format("[OSP OTP] MAC={0:X12} NodeId={1} 영구 프로그램 완료", mac, nodeId));
+            return true;
+        }
+
+        /// <summary>
+        /// OTP designer 블록(0=MAC, 4=PLCA)에 실제로 구워진 값을 읽습니다.
+        /// ReadMacNode() 가 반환하는 IF Pin(SA_IF) 샘플링 값과 달리,
+        /// 전원을 껐다 켜도 남는 "OTP에 영구 저장된 값" 입니다.
+        /// </summary>
+        /// <param name="mac">읽은 MAC (MSB = bit47)</param>
+        /// <param name="nodeId">읽은 PLCA Node ID</param>
+        /// <param name="bootStatusMac">MAC 블록 boot status (0=미사용/writable, 그 외=programmed)</param>
+        /// <param name="bootStatusPlca">PLCA 블록 boot status</param>
+        /// <param name="raw">designer 블록 원본 덤프 (레이아웃 검증용)</param>
+        public bool ReadMacNodeOtp(out ulong mac, out byte nodeId,
+            out byte bootStatusMac, out byte bootStatusPlca, out byte[] raw)
+        {
+            mac = 0; nodeId = 0; bootStatusMac = 0; bootStatusPlca = 0;
+            // ADI_OTP_NUM_DESIGNER_SCRIPTS_BLOCKS * ADI_OTP_BLOCK_LEN_BYTES.
+            // SDK 값과 다르면 네이티브가 memcpy 하는 길이에 맞춰 조정하세요.
+            raw = new byte[8 * 16];
+
+            if (!IsConnected || !_nativeOspBridge)
+            {
+                LastError = "FT4222 미연결 또는 OspBridge 초기화 안 됨";
+                return false;
+            }
+
+            byte[] buf = new byte[6];
+            int st = OspBridge_ReadMacNodeOtp(buf, out nodeId,
+                out bootStatusMac, out bootStatusPlca, raw);
+            if (st != 0)
+            {
+                LastError = "OspBridge_ReadMacNodeOtp 실패: " + st + "\r\n" + GetNativeBridgeError();
+                OspLog?.Invoke("[OTP ERR] " + LastError.Replace("\r\n", " / "));
+                return false;
+            }
+
+            mac = ((ulong)buf[0] << 40)
+                | ((ulong)buf[1] << 32)
+                | ((ulong)buf[2] << 24)
+                | ((ulong)buf[3] << 16)
+                | ((ulong)buf[4] << 8)
+                | (ulong)buf[5];
+
+            OspLog?.Invoke(string.Format(
+                "[OTP] ReadMacNodeOtp: MAC={0:X12} Node={1} bootStatus(MAC/PLCA)={2}/{3}",
+                mac, nodeId, bootStatusMac, bootStatusPlca));
             return true;
         }
 

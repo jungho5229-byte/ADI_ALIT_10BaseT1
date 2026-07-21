@@ -34,6 +34,9 @@
             this.lblImgColor = new System.Windows.Forms.Label();
             this.pnlColorPatch = new System.Windows.Forms.Panel();
             this.lblPatchL = new System.Windows.Forms.Label();
+            this.chkOspTxEnable = new System.Windows.Forms.CheckBox();
+            this.chkIlasTxEnable = new System.Windows.Forms.CheckBox();
+            this.chkRxEnable = new System.Windows.Forms.CheckBox();
             this.grpFID = new System.Windows.Forms.GroupBox();
             this.lblFID = new System.Windows.Forms.Label();
             this.cmbFID = new System.Windows.Forms.ComboBox();
@@ -352,6 +355,46 @@
             this.lblPatchL.Size = new System.Drawing.Size(169, 28);
             this.lblPatchL.TabIndex = 11;
             this.lblPatchL.Text = "선택된 색상 미리보기\n(CIE 또는 이미지 클릭으로 갱신)";
+            // 
+            // chkOspTxEnable
+            // 
+            this.chkOspTxEnable.AutoSize = true;
+            this.chkOspTxEnable.Checked = true;
+            this.chkOspTxEnable.CheckState = System.Windows.Forms.CheckState.Checked;
+            this.chkOspTxEnable.Font = new System.Drawing.Font("Consolas", 8.5F);
+            this.chkOspTxEnable.ForeColor = System.Drawing.Color.FromArgb(((int)(((byte)(200)))), ((int)(((byte)(220)))), ((int)(((byte)(240)))));
+            this.chkOspTxEnable.Location = new System.Drawing.Point(1040, 38);
+            this.chkOspTxEnable.Name = "chkOspTxEnable";
+            this.chkOspTxEnable.Size = new System.Drawing.Size(47, 18);
+            this.chkOspTxEnable.TabIndex = 12;
+            this.chkOspTxEnable.Text = "OSP";
+            this.chkOspTxEnable.UseVisualStyleBackColor = false;
+            // 
+            // chkIlasTxEnable
+            // 
+            this.chkIlasTxEnable.AutoSize = true;
+            this.chkIlasTxEnable.Checked = true;
+            this.chkIlasTxEnable.CheckState = System.Windows.Forms.CheckState.Checked;
+            this.chkIlasTxEnable.Font = new System.Drawing.Font("Consolas", 8.5F);
+            this.chkIlasTxEnable.ForeColor = System.Drawing.Color.FromArgb(((int)(((byte)(200)))), ((int)(((byte)(220)))), ((int)(((byte)(240)))));
+            this.chkIlasTxEnable.Location = new System.Drawing.Point(1095, 38);
+            this.chkIlasTxEnable.Name = "chkIlasTxEnable";
+            this.chkIlasTxEnable.Size = new System.Drawing.Size(54, 18);
+            this.chkIlasTxEnable.TabIndex = 13;
+            this.chkIlasTxEnable.Text = "ILAS";
+            this.chkIlasTxEnable.UseVisualStyleBackColor = false;
+            // 
+            // chkRxEnable
+            // 
+            this.chkRxEnable.AutoSize = true;
+            this.chkRxEnable.Font = new System.Drawing.Font("Consolas", 8.5F);
+            this.chkRxEnable.ForeColor = System.Drawing.Color.FromArgb(((int)(((byte)(200)))), ((int)(((byte)(220)))), ((int)(((byte)(240)))));
+            this.chkRxEnable.Location = new System.Drawing.Point(1157, 38);
+            this.chkRxEnable.Name = "chkRxEnable";
+            this.chkRxEnable.Size = new System.Drawing.Size(40, 18);
+            this.chkRxEnable.TabIndex = 14;
+            this.chkRxEnable.Text = "RX";
+            this.chkRxEnable.UseVisualStyleBackColor = false;
             // 
             // grpFID
             // 
@@ -1360,7 +1403,7 @@
             0,
             0});
             this.nudInterval.Minimum = new decimal(new int[] {
-            10,
+            1,
             0,
             0,
             0});
@@ -1423,6 +1466,9 @@
             this.Controls.Add(this.tabColor);
             this.Controls.Add(this.pnlColorPatch);
             this.Controls.Add(this.lblPatchL);
+            this.Controls.Add(this.chkOspTxEnable);
+            this.Controls.Add(this.chkIlasTxEnable);
+            this.Controls.Add(this.chkRxEnable);
             this.Controls.Add(this.grpFID);
             this.Controls.Add(this.grpSF);
             this.Controls.Add(this.grpColor);
@@ -1488,6 +1534,9 @@
         private System.Windows.Forms.Label          lblImgColor;
         private System.Windows.Forms.Panel          pnlColorPatch;
         private System.Windows.Forms.Label          lblPatchL;
+        private System.Windows.Forms.CheckBox       chkOspTxEnable;
+        private System.Windows.Forms.CheckBox       chkIlasTxEnable;
+        private System.Windows.Forms.CheckBox       chkRxEnable;
         private System.Windows.Forms.GroupBox       grpFID;
         private System.Windows.Forms.Label          lblFID;
         private System.Windows.Forms.ComboBox       cmbFID;

@@ -21,6 +21,7 @@ namespace LINMaster.Forms
             this.lblCurMacLbl   = new System.Windows.Forms.Label();
             this.lblCurNodeLbl  = new System.Windows.Forms.Label();
             this.btnRead        = new System.Windows.Forms.Button();
+            this.btnReadOtp     = new System.Windows.Forms.Button();
 
             this.grpWrite       = new System.Windows.Forms.GroupBox();
             this.lblNewMacLbl   = new System.Windows.Forms.Label();
@@ -140,11 +141,23 @@ namespace LINMaster.Forms
             this.btnRead.TabIndex      = 0;
             this.btnRead.Click        += new System.EventHandler(this.btnRead_Click);
 
+            this.btnReadOtp.Text          = "▶  Read OTP  (OTP 값 읽기)";
+            this.btnReadOtp.BackColor     = System.Drawing.Color.FromArgb(60, 110, 90);
+            this.btnReadOtp.ForeColor     = System.Drawing.Color.White;
+            this.btnReadOtp.FlatStyle     = System.Windows.Forms.FlatStyle.Flat;
+            this.btnReadOtp.FlatAppearance.BorderSize = 0;
+            this.btnReadOtp.Font          = font9b;
+            this.btnReadOtp.Location      = new System.Drawing.Point(222, 95);
+            this.btnReadOtp.Size          = new System.Drawing.Size(220, 26);
+            this.btnReadOtp.TabIndex      = 6;
+            this.btnReadOtp.Click        += new System.EventHandler(this.btnReadOtp_Click);
+
             this.grpRead.Controls.Add(this.lblCurMacLbl);
             this.grpRead.Controls.Add(this.lblCurrentMac);
             this.grpRead.Controls.Add(this.lblCurNodeLbl);
             this.grpRead.Controls.Add(this.lblCurrentNode);
             this.grpRead.Controls.Add(this.btnRead);
+            this.grpRead.Controls.Add(this.btnReadOtp);
 
             // ─────────────────────────────────────────────────────
             // grpWrite – 새 값 입력 및 쓰기
@@ -322,6 +335,7 @@ namespace LINMaster.Forms
         private System.Windows.Forms.Label          lblCurNodeLbl;
         private System.Windows.Forms.Label          lblCurrentNode;
         private System.Windows.Forms.Button         btnRead;
+        private System.Windows.Forms.Button         btnReadOtp;
 
         private System.Windows.Forms.GroupBox       grpWrite;
         private System.Windows.Forms.Label          lblNewMacLbl;

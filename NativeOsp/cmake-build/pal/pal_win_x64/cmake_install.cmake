@@ -1,4 +1,4 @@
-# Install script for directory: C:/Analog Devices/EdgeStudio 3.8.0/sdk/lib/pal/pal_win_x64
+# Install script for directory: C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260715_OSP_Ilas_OK/NativeOsp/sdk/lib/pal/pal_win_x64
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
@@ -40,6 +40,6 @@ endif()
 string(REPLACE ";" "\n" CMAKE_INSTALL_MANIFEST_CONTENT
        "${CMAKE_INSTALL_MANIFEST_FILES}")
 if(CMAKE_INSTALL_LOCAL_ONLY)
-  file(WRITE "C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260622_OTP/NativeOsp/cmake-build/pal/pal_win_x64/install_local_manifest.txt"
+  file(WRITE "C:/Users/HKKIM/Desktop/jhhan/AD3306_AD6601/AD3304_20260715_OSP_Ilas_OK/NativeOsp/cmake-build/pal/pal_win_x64/install_local_manifest.txt"
      "${CMAKE_INSTALL_MANIFEST_CONTENT}")
 endif()

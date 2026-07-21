@@ -60,7 +60,6 @@
 #define FIO_OSP_QUEUE_DEPTH     (60U)
 #define FIO_OSP_MEM             (ADI_EAL_FIO_OSP_UNICAST_INST_MEM_SIZE(FIO_OSP_QUEUE_DEPTH))
 #define FIO_OSP_MEM_WORDS       ((FIO_OSP_MEM + 3U) / 4U)
-
 #define NUM_LEDS                (1u)
 #define BROADCAST_DEV_ADDR      (0u)
 #define INIT_DEV_ADDR           (1u)

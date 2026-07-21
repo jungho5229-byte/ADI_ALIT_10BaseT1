@@ -125,7 +125,7 @@ namespace LINMaster.Forms
             this.grpConn.ForeColor = System.Drawing.Color.FromArgb(((int)(((byte)(120)))), ((int)(((byte)(200)))), ((int)(((byte)(255)))));
             this.grpConn.Location = new System.Drawing.Point(12, 12);
             this.grpConn.Name = "grpConn";
-            this.grpConn.Size = new System.Drawing.Size(422, 227);
+            this.grpConn.Size = new System.Drawing.Size(460, 227);
             this.grpConn.TabIndex = 0;
             this.grpConn.TabStop = false;
             this.grpConn.Text = "[ 연결 설정  (COM: 115200,8,N,1) ]";
@@ -190,7 +190,7 @@ namespace LINMaster.Forms
             this.rdoFT4222.ForeColor = System.Drawing.Color.FromArgb(((int)(((byte)(100)))), ((int)(((byte)(220)))), ((int)(((byte)(150)))));
             this.rdoFT4222.Location = new System.Drawing.Point(228, 55);
             this.rdoFT4222.Name = "rdoFT4222";
-            this.rdoFT4222.Size = new System.Drawing.Size(100, 20);
+            this.rdoFT4222.Size = new System.Drawing.Size(75, 20);
             this.rdoFT4222.TabIndex = 14;
             this.rdoFT4222.Text = "FT4222";
             this.rdoFT4222.UseVisualStyleBackColor = false;
@@ -202,9 +202,9 @@ namespace LINMaster.Forms
             this.chkFt4222UseOtp.BackColor = System.Drawing.Color.Transparent;
             this.chkFt4222UseOtp.Font = new System.Drawing.Font("Consolas", 9F);
             this.chkFt4222UseOtp.ForeColor = System.Drawing.Color.FromArgb(((int)(((byte)(120)))), ((int)(((byte)(220)))), ((int)(((byte)(150)))));
-            this.chkFt4222UseOtp.Location = new System.Drawing.Point(114, 154);
+            this.chkFt4222UseOtp.Location = new System.Drawing.Point(309, 57);
             this.chkFt4222UseOtp.Name = "chkFt4222UseOtp";
-            this.chkFt4222UseOtp.Size = new System.Drawing.Size(152, 18);
+            this.chkFt4222UseOtp.Size = new System.Drawing.Size(138, 18);
             this.chkFt4222UseOtp.TabIndex = 15;
             this.chkFt4222UseOtp.Text = "Use OTP MAC/Node";
             this.chkFt4222UseOtp.UseVisualStyleBackColor = false;

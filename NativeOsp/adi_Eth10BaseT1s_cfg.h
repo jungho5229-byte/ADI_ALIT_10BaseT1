@@ -11,7 +11,7 @@ and its licensors.
  * @note         : AD3304 x8 지원 (FID 0x01~0x08)
  *                 연결된 AD3304만 동작 — MAC 마지막 바이트 = FID
 ******************************************************************************/
-//1
+
 /* =========================================================================
    |                   SELECTIVE INTERFACE DEFINES                         |
    ========================================================================= */
@@ -20,6 +20,9 @@ and its licensors.
 #endif
 #ifndef ADI_E2B_IFACE_FIO_OSP_ENABLED
 #define ADI_E2B_IFACE_FIO_OSP_ENABLED
+#endif
+#ifndef ADI_E2B_IFACE_ISELED_ENABLED
+#define ADI_E2B_IFACE_ISELED_ENABLED
 #endif
 #ifndef ADI_E2B_IFACE_SMC_ENABLED
 #define ADI_E2B_IFACE_SMC_ENABLED
@@ -103,6 +106,7 @@ extern ADI_E2BCORE_CFG oEth10BaseT1sNtwrkCfg;
 extern void Eth10BaseT1sCbk(const ADI_E2BCORE_ID *poID, ADI_E2BCORE_CBKTYPE eType, void *poParam, bool bIsTxFrame, void *pCbParam);
 extern void RemoteNodeCbk(const ADI_E2BCORE_ID *poID, ADI_E2BCORE_CBKTYPE eType, void *poParam, bool bIsTxFrame, void *pCbParam);
 extern void FioOspInterfaceCbk(const ADI_E2BCORE_ID *poID, ADI_E2BCORE_CBKTYPE eType, void *poParam, bool bIsTxFrame, void *pCbParam);
+extern void IseledInterfaceCbk(const ADI_E2BCORE_ID *poID, ADI_E2BCORE_CBKTYPE eType, void *poParam, bool bIsTxFrame, void *pCbParam);
 
 /* =========================================================================
    |                     MAC RUNTIME UPDATE (AD3304)                       |
